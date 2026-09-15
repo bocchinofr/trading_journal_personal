@@ -367,106 +367,104 @@ function KpiStrip({ trades, isDesktop }) {
     const best = sorted[sorted.length - 1];
 
     const byDate = [...trades].sort((a, b) => a.date.localeCompare(b.date));
+    let cum = 0, peak = 0, isNewHigh = false;
     let curWin = 0, curLoss = 0, maxWinStreak = 0, maxLossStreak = 0;
-    byDate.forEach(t => {
+    byDate.forEach((t, i) => {
+      cum += t.pnl;
+      if (cum > peak) peak = cum;
+      if (i === byDate.length - 1) isNewHigh = n > 0 && cum >= peak;
       if (t.pnl > 0) { curWin++; curLoss = 0; maxWinStreak = Math.max(maxWinStreak, curWin); }
       else { curLoss++; curWin = 0; maxLossStreak = Math.max(maxLossStreak, curLoss); }
     });
-
-    let cum = 0;
-    const sparkPoints = byDate.slice(-20).map(t => { cum += t.pnl; return cum; });
+    // streak corrente = ultima serie consecutiva (win o loss) fino ad oggi
+    let currentStreak = 0, currentStreakType = null;
+    for (let i = byDate.length - 1; i >= 0; i--) {
+      const isWin = byDate[i].pnl > 0;
+      if (currentStreakType === null) { currentStreakType = isWin; currentStreak = 1; }
+      else if (isWin === currentStreakType) { currentStreak++; }
+      else break;
+    }
 
     return {
       n, totalPnl, winrate, expectancy, pf, avgWin, avgLoss, best, worst,
-      maxWinStreak, maxLossStreak, sparkPoints,
-      winsCount: wins.length, lossesCount: losses.length,
+      maxWinStreak, maxLossStreak, winsCount: wins.length, lossesCount: losses.length,
+      isNewHigh, currentStreak, currentStreakType,
     };
   }, [trades]);
 
-  const sparkPath = useMemo(() => {
-    const pts = stats.sparkPoints;
-    if (pts.length < 2) return '';
-    const min = Math.min(...pts), max = Math.max(...pts);
-    const range = (max - min) || 1;
-    const stepX = 120 / (pts.length - 1);
-    return pts.map((v, i) => {
-      const x = i * stepX;
-      const y = 36 - ((v - min) / range) * 32 - 2;
-      return `${i === 0 ? 'M' : 'L'}${x.toFixed(1)},${y.toFixed(1)}`;
-    }).join(' ');
-  }, [stats.sparkPoints]);
-
-  const status = stats.n < 20
-    ? { label: `Pochi dati (${stats.n})`, color: C.yellow, icon: '◐' }
-    : (stats.winrate >= 0.5 && stats.totalPnl >= 0)
-    ? { label: 'In edge positivo', color: C.profit, icon: '●' }
-    : { label: 'Sotto soglia', color: C.loss, icon: '●' };
-
-  const heroCardStyle = {
-    flex: 1, background: C.card, border: `1px solid ${C.border}`, borderRadius: 14,
-    padding: isDesktop ? '18px 20px' : '14px 16px', position: 'relative', overflow: 'hidden', minWidth: 0,
-  };
-  const heroLabelStyle = { fontSize: 12, color: C.muted, textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 6 };
+  const lowData = stats.n < 20;
   const badgeStyle = color => ({
-    display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12, fontWeight: 700,
-    padding: '4px 10px', borderRadius: 20, marginTop: 10,
+    display: 'inline-block', fontSize: 10, fontWeight: 700,
+    padding: '2px 7px', borderRadius: 10, marginTop: 6,
     background: `${color}1f`, color, border: `1px solid ${color}4d`,
   });
 
-  const secKpis = [
-    { label: 'Trade totali', val: String(stats.n), color: C.accent },
-    { label: 'Expectancy', val: `${fmt$(stats.expectancy)}/tr`, color: C.text },
-    { label: 'Profit factor', val: stats.pf.toFixed(2), color: stats.pf >= 1.5 ? C.profit : C.loss },
-    ...(stats.n ? [
-      { label: 'Miglior trade', val: fmt$(stats.best.pnl), color: C.profit },
-      { label: 'Peggior trade', val: fmt$(stats.worst.pnl), color: C.loss },
-      { label: 'Profit medio', val: fmt$(stats.avgWin), color: C.profit },
-      { label: 'Loss medio', val: `-${stats.avgLoss.toFixed(0)}$`, color: C.loss },
-      { label: 'Streak vincite', val: String(stats.maxWinStreak), color: C.profit },
-      { label: 'Streak perdite', val: String(stats.maxLossStreak), color: C.loss },
-    ] : []),
+  const mainCards = [
+    {
+      label: 'P&L totale', val: fmt$(stats.totalPnl), color: stats.totalPnl >= 0 ? C.profit : C.loss,
+      badge: stats.isNewHigh && stats.n > 0 ? { text: '● Nuovo massimo', color: C.profit } : null,
+    },
+    {
+      label: 'Winrate', val: `${(stats.winrate * 100).toFixed(0)}%`, color: stats.winrate >= 0.5 ? C.profit : C.loss,
+      badge: lowData ? { text: `◐ Pochi dati (${stats.n})`, color: C.yellow } : null,
+    },
+    { label: 'Expectancy', val: fmt$(stats.expectancy), color: C.text, badge: null },
+    {
+      label: 'Profit factor', val: stats.pf.toFixed(2), color: stats.pf >= 1.5 ? C.profit : C.loss,
+      badge: stats.pf < 1.2 ? { text: '▼ Sotto soglia', color: C.loss }
+        : stats.pf >= 1.5 ? { text: '● Solido', color: C.profit } : null,
+    },
   ];
 
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 12, minWidth: 0 }}>
-      <div style={{ display: 'flex', gap: 12, flexWrap: isDesktop ? 'nowrap' : 'wrap' }}>
-        <div style={heroCardStyle}>
-          <div style={heroLabelStyle}>P&L totale</div>
-          <div style={{ fontSize: isDesktop ? 34 : 26, fontWeight: 800, fontFamily: 'monospace', lineHeight: 1, color: stats.totalPnl >= 0 ? C.profit : C.loss }}>
-            {fmt$(stats.totalPnl)}
-          </div>
-          <div style={{ fontSize: 12, color: C.muted, marginTop: 8 }}>
-            {fmt$(stats.expectancy)}/trade · ultimi {stats.sparkPoints.length} trade
-          </div>
-          {sparkPath && (
-            <svg viewBox="0 0 120 40" preserveAspectRatio="none"
-              style={{ position: 'absolute', right: 16, top: isDesktop ? 20 : 14, width: 110, height: 36 }}>
-              <path d={sparkPath} fill="none" stroke={stats.totalPnl >= 0 ? C.profit : C.loss} strokeWidth="2" />
-            </svg>
-          )}
-        </div>
-        <div style={heroCardStyle}>
-          <div style={heroLabelStyle}>Winrate</div>
-          <div style={{ fontSize: isDesktop ? 34 : 26, fontWeight: 800, fontFamily: 'monospace', lineHeight: 1, color: stats.winrate >= 0.5 ? C.profit : C.loss }}>
-            {(stats.winrate * 100).toFixed(0)}%
-          </div>
-          <div style={{ fontSize: 12, color: C.muted, marginTop: 8 }}>
-            {stats.n} trade · {stats.winsCount} vinti / {stats.lossesCount} persi
-          </div>
-          <div style={badgeStyle(status.color)}>{status.icon} {status.label}</div>
-        </div>
-      </div>
+  const streakLabel = stats.currentStreak
+    ? `${stats.currentStreak} ${stats.currentStreakType ? 'win' : 'loss'} di fila`
+    : '—';
 
-      <div style={{ display: 'grid', gridTemplateColumns: `repeat(auto-fit, minmax(${isDesktop ? 110 : 100}px, 1fr))`, gap: 10 }}>
-        {secKpis.map((k, i) => (
-          <div key={i} style={{ background: C.card2, borderRadius: 10, padding: '10px 12px', minWidth: 0 }}>
-            <div style={{ fontSize: 10, color: C.muted, textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: 4 }}>{k.label}</div>
-            <div style={{ fontSize: isDesktop ? 16 : 14, fontWeight: 800, color: k.color, fontFamily: 'monospace', lineHeight: 1.1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-              {k.val}
-            </div>
+  const secKpis = stats.n ? [
+    { label: 'Miglior trade', val: fmt$(stats.best.pnl), sub: stats.best.ticker, color: C.profit },
+    { label: 'Peggior trade', val: fmt$(stats.worst.pnl), sub: stats.worst.ticker, color: C.loss },
+    { label: 'Trade totali', val: String(stats.n), sub: `${stats.winsCount} win / ${stats.lossesCount} loss`, color: C.accent },
+    { label: 'Profit medio', val: fmt$(stats.avgWin), sub: 'sui vinti', color: C.profit },
+    { label: 'Loss medio', val: `-${stats.avgLoss.toFixed(0)}$`, sub: 'sui persi', color: C.loss },
+    {
+      label: 'Streak', val: `${stats.maxWinStreak} / ${stats.maxLossStreak}`,
+      sub: `ora: ${streakLabel}`, color: stats.currentStreakType ? C.profit : C.loss,
+    },
+  ] : [];
+
+  const wrapStyle = isDesktop
+    ? { display: 'grid', gridTemplateColumns: '1fr 1px 1.1fr', gap: 16, alignItems: 'stretch', minWidth: 0 }
+    : { display: 'flex', flexDirection: 'column', gap: 14, minWidth: 0 };
+
+  return (
+    <div style={wrapStyle}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 12, minWidth: 0 }}>
+        {mainCards.map((k, i) => (
+          <div key={i} style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: '14px 14px', minWidth: 0 }}>
+            <div style={{ fontSize: 11, color: C.muted, textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: 6 }}>{k.label}</div>
+            <div style={{ fontSize: 22, fontWeight: 800, color: k.color, fontFamily: 'monospace', lineHeight: 1.1 }}>{k.val}</div>
+            {k.badge && <div style={badgeStyle(k.badge.color)}>{k.badge.text}</div>}
           </div>
         ))}
       </div>
+
+      {isDesktop ? (
+        <div style={{ background: C.border }} />
+      ) : (
+        <div style={{ height: 1, background: C.border }} />
+      )}
+
+      {secKpis.length > 0 ? (
+        <div style={{ display: 'grid', gridTemplateColumns: `repeat(${isDesktop ? 3 : 2}, 1fr)`, gap: 12, minWidth: 0 }}>
+          {secKpis.map((k, i) => (
+            <div key={i} style={{ background: C.card2, border: `1px solid ${C.border}`, borderRadius: 12, padding: '10px 12px', minWidth: 0 }}>
+              <div style={{ fontSize: 10, color: C.muted, textTransform: 'uppercase', letterSpacing: '.04em', marginBottom: 4 }}>{k.label}</div>
+              <div style={{ fontSize: 16, fontWeight: 800, color: k.color, fontFamily: 'monospace', lineHeight: 1.1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{k.val}</div>
+              {k.sub && <div style={{ fontSize: 11, color: C.muted, marginTop: 2 }}>{k.sub}</div>}
+            </div>
+          ))}
+        </div>
+      ) : <div />}
     </div>
   );
 }
