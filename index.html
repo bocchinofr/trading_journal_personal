@@ -477,9 +477,10 @@ function MonthCalendar({ trades, onDayClick, isDesktop, cursor, setCursor }) {
     const map = {};
     trades.forEach(t => {
       const key = t.date;
-      if (!map[key]) map[key] = { pnl: 0, count: 0 };
+      if (!map[key]) map[key] = { pnl: 0, count: 0, hasWarning: false };
       map[key].pnl += t.pnl;
       map[key].count += 1;
+      if (getWarningTags(t).length > 0) map[key].hasWarning = true;
     });
     return map;
   }, [trades]);
@@ -521,11 +522,14 @@ function MonthCalendar({ trades, onDayClick, isDesktop, cursor, setCursor }) {
           const bg = !has ? C.card2 : info.pnl >= 0 ? `rgba(95,216,143,${intensity(info.pnl)})` : `rgba(255,138,128,${intensity(info.pnl)})`;
           return (
             <div key={i} onClick={() => has && onDayClick(key)} style={{
-              aspectRatio: '1.35', borderRadius: 8, background: bg,
+              aspectRatio: '1.35', borderRadius: 8, background: bg, position: 'relative',
               border: `1px solid ${has ? 'transparent' : C.border}`,
               display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
               cursor: has ? 'pointer' : 'default', padding: 4,
             }}>
+              {has && info.hasWarning && (
+                <span style={{ position: 'absolute', top: 4, right: 6, fontSize: isDesktop ? 13 : 10 }} title="Tag negativi in questo giorno">⚠️</span>
+              )}
               <span style={{ fontSize: isDesktop ? 22 : 16, color: has ? C.text : C.muted, fontWeight: 800, lineHeight: 1 }}>{d}</span>
               {has && (<>
                 <span style={{ fontSize: isDesktop ? 17 : 13, fontFamily: 'monospace', fontWeight: 800, color: info.pnl >= 0 ? C.profit : C.loss, marginTop: 4, lineHeight: 1 }}>
@@ -540,6 +544,7 @@ function MonthCalendar({ trades, onDayClick, isDesktop, cursor, setCursor }) {
     </div>
   );
 }
+
 const navBtnStyle = { width: 34, height: 34, borderRadius: 6, border: `1px solid ${C.border}`, background: C.card2, color: C.text, cursor: 'pointer', fontSize: 20 };
 
 function MonthMini({ year, month, dayPnl, onDayClick }) {
@@ -1071,6 +1076,18 @@ function TradeLog({ trades, onUpdate, onDelete, onDuplicate, allTags = [], isDes
                 <span style={{ fontSize: isDesktop ? 14 : 12, color: C.muted, width: W_DATE, flexShrink: 0, fontFamily: 'monospace' }}>{t.date}</span>
                 <span style={{ fontSize: isDesktop ? 17 : 13, fontWeight: 800, color: C.text, width: W_TICKER, flexShrink: 0 }}>{t.ticker}</span>
                 <span style={{ fontSize: 11, fontWeight: 800, padding: '3px 8px', borderRadius: 4, flexShrink: 0, width: 58, textAlign: 'center', background: t.side === 'short' ? 'rgba(255,138,128,0.15)' : 'rgba(95,216,143,0.15)', color: t.side === 'short' ? C.loss : C.profit }}>{t.side === 'short' ? 'SHORT' : 'LONG'}</span>
+                {(() => {
+                  const eTag = t.journal?.eventTags?.[0];
+                  if (!eTag) return null;
+                  const positive = POSITIVE_EVENT_TAGS.includes(eTag);
+                  return (
+                    <span style={{
+                      fontSize: 11, fontWeight: 700, padding: '3px 9px', borderRadius: 8, flexShrink: 0,
+                      background: positive ? 'rgba(95,216,143,0.15)' : 'rgba(255,138,128,0.15)',
+                      color: positive ? C.profit : C.loss, whiteSpace: 'nowrap',
+                    }}>{eTag}</span>
+                  );
+                })()}
                 <div style={{ display: 'flex', gap: 4, flex: 1, overflow: 'hidden', minWidth: 0 }}>
                   {getTags(t).slice(0, isDesktop ? 2 : 1).map(tag => (<span key={tag} style={{ fontSize: 11, fontWeight: 700, padding: '3px 9px', borderRadius: 8, background: `${C.accent}18`, color: C.accent, whiteSpace: 'nowrap' }}>{tag}</span>))}
                   {getTags(t).length > (isDesktop ? 2 : 1) && <span style={{ fontSize: 11, color: C.muted }}>+{getTags(t).length - (isDesktop ? 2 : 1)}</span>}
