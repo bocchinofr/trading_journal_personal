@@ -1,0 +1,2299 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Trading Journal</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #0a0f16; }
+  #root { min-height: 100vh; }
+  * { box-sizing: border-box; }
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-thumb { background: #232d38; border-radius: 4px; }
+
+  /* Desktop: nessuno scroll a livello di pagina */
+  @media (min-width: 820px) {
+    html, body { height: 100%; overflow: hidden; }
+    #root { height: 100%; min-height: 0; }
+  }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/prop-types/prop-types.min.js"></script>
+<script crossorigin src="https://unpkg.com/recharts@2.12.0/umd/Recharts.js"></script>
+<script crossorigin src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://unpkg.com/@supabase/supabase-js@2"></script>
+
+<script>
+  Babel.registerPreset('react-classic', {
+    presets: [[Babel.availablePresets['react'], { runtime: 'classic' }]]
+  });
+</script>
+
+<script type="text/babel" data-presets="react-classic">
+const { useState, useEffect, useCallback, useMemo, useRef } = React;
+const { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine } = Recharts;
+
+const THEMES = {
+  dark: {
+    bg: '#0a0f16', card: '#111923', card2: '#17212c', border: '#26323e',
+    text: '#e8edf2', muted: '#8d9aa6', accent: '#a4e6ff', profit: '#66dd8b',
+    loss: '#ffaaa4', yellow: '#f3d36b'
+  },
+  light: {
+    bg: '#f3f6f8', card: '#ffffff', card2: '#eef3f6', border: '#d6dee5',
+    text: '#17212b', muted: '#64727e', accent: '#1976a8', profit: '#168a4a',
+    loss: '#c94b45', yellow: '#9a7100'
+  }
+};
+let C = { ...THEMES.dark };
+
+const sb = window.supabase.createClient(
+  'https://xcslukcgmvqpfqippoxn.supabase.co',
+  'sb_publishable_UHVBFrq9-ZHLu3IUEh3Pxw_cK8vDBxP'
+);
+
+const JOURNAL_PASSWORD = 'Peppino38!';
+
+function PasswordGate({ children }) {
+  const [unlocked, setUnlocked] = useState(() => sessionStorage.getItem('journal-unlocked') === '1');
+  const [input, setInput] = useState('');
+  const [err, setErr] = useState(false);
+
+  if (unlocked) return children;
+
+  const tryUnlock = () => {
+    if (input === JOURNAL_PASSWORD) {
+      sessionStorage.setItem('journal-unlocked', '1');
+      setUnlocked(true);
+    } else {
+      setErr(true);
+    }
+  };
+
+  return (
+    <div style={{ height: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#0a0f16' }}>
+      <div style={{ background: '#111923', border: '1px solid #26323e', borderRadius: 12, padding: 30, width: 300 }}>
+        <div style={{ color: '#e8edf2', fontWeight: 800, marginBottom: 14 }}>🔒 Trading Journal</div>
+        <input type="password" value={input} autoFocus
+          onChange={e => { setInput(e.target.value); setErr(false); }}
+          onKeyDown={e => e.key === 'Enter' && tryUnlock()}
+          style={{ width: '100%', padding: '9px 12px', borderRadius: 6, border: '1px solid #26323e', background: '#17212c', color: '#e8edf2', marginBottom: 10 }} />
+        <button onClick={tryUnlock} style={{ width: '100%', padding: '9px', borderRadius: 6, border: 'none', background: '#a4e6ff', color: '#06121a', fontWeight: 800, cursor: 'pointer' }}>Entra</button>
+        {err && <div style={{ color: '#ffaaa4', fontSize: 13, marginTop: 8 }}>Password errata</div>}
+      </div>
+    </div>
+  );
+}
+
+function applyTheme(theme) {
+  C = { ...(THEMES[theme] || THEMES.dark) };
+  document.documentElement.style.background = C.bg;
+  document.body.style.background = C.bg;
+  document.body.style.color = C.text;
+}
+
+function uuid() {
+  if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+    try { return window.crypto.randomUUID(); } catch (e) {}
+  }
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+    const r = Math.random() * 16 | 0;
+    const v = c === 'x' ? r : (r & 0x3 | 0x8);
+    return v.toString(16);
+  });
+}
+
+const LS_PREFIX = 'trading-journal:';
+
+function tradeToRow(t) {
+  return {
+    id: t.id, date: t.date, ticker: t.ticker, side: t.side,
+    entry_price: t.entryPrice, exit_price: t.exitPrice, time: t.time,
+    pnl: t.pnl, locate_cost: t.locateCost || 0, commission: t.commission || 0,
+    tags: t.tags || [], notes: t.notes || '', journal: t.journal || {},
+    chart_image: t.chartImage || null,
+  };
+}
+function rowToTrade(r) {
+  return {
+    id: r.id, date: r.date, ticker: r.ticker, side: r.side,
+    entryPrice: r.entry_price, exitPrice: r.exit_price, time: r.time,
+    pnl: r.pnl, locateCost: r.locate_cost, commission: r.commission,
+    tags: r.tags || [], notes: r.notes, journal: r.journal || {},
+    chartImage: r.chart_image,
+  };
+}
+function noteToRow(n) {
+  return {
+    id: n.id, date: n.date, ticker: n.ticker, notes: n.notes || '',
+    journal: n.journal || {}, chart_image: n.chartImage || null, used: !!n.used,
+  };
+}
+function rowToNote(r) {
+  return {
+    id: r.id, date: r.date, ticker: r.ticker, notes: r.notes,
+    journal: r.journal || {}, chartImage: r.chart_image, used: r.used,
+  };
+}
+
+const dataStore = {
+  async getTrades() {
+    const { data, error } = await sb.from('journal_trades').select('*').order('date');
+    if (error) { console.error(error); return []; }
+    return data.map(rowToTrade);
+  },
+  async saveTrades(trades) {
+    // upsert completo: cancella e reinserisce (semplice, ok per volumi piccoli)
+    await sb.from('journal_trades').delete().neq('id', '00000000-0000-0000-0000-000000000000');
+    if (trades.length) await sb.from('journal_trades').insert(trades.map(tradeToRow));
+  },
+  async getReviews() {
+    const { data, error } = await sb.from('journal_reviews').select('*');
+    if (error) { console.error(error); return {}; }
+    const map = {};
+    data.forEach(r => { map[r.week_key] = { rating: r.rating, notes: r.notes, checklist: r.checklist || {} }; });
+    return map;
+  },
+  async saveReviews(reviews) {
+    const rows = Object.entries(reviews).map(([week_key, r]) => ({
+      week_key, rating: r.rating, notes: r.notes || '', checklist: r.checklist || {},
+    }));
+    if (rows.length) await sb.from('journal_reviews').upsert(rows);
+  },
+  async getPendingNotes() {
+    const { data, error } = await sb.from('journal_pending_notes').select('*').order('date');
+    if (error) { console.error(error); return []; }
+    return data.map(rowToNote);
+  },
+  async savePendingNotes(notes) {
+    await sb.from('journal_pending_notes').delete().neq('id', '00000000-0000-0000-0000-000000000000');
+    if (notes.length) await sb.from('journal_pending_notes').insert(notes.map(noteToRow));
+  },
+  async getTheme() {
+    try { const v = localStorage.getItem('trading-journal:theme'); return v || 'dark'; }
+    catch { return 'dark'; }
+  },
+  async saveTheme(theme) { localStorage.setItem('trading-journal:theme', theme); },
+};
+
+const fmt$ = v => `${v >= 0 ? '+' : ''}${v.toFixed(0)}$`;
+const monthNames = ['Gen','Feb','Mar','Apr','Mag','Giu','Lug','Ago','Set','Ott','Nov','Dic'];
+const dayLabels = ['L','M','M','G','V','S','D'];
+
+function getMonday(dateStr) {
+  const d = new Date(dateStr + 'T00:00:00');
+  const day = (d.getDay() + 6) % 7;
+  d.setDate(d.getDate() - day);
+  return d.toISOString().slice(0, 10);
+}
+function addDays(dateStr, n) {
+  const d = new Date(dateStr + 'T00:00:00');
+  d.setDate(d.getDate() + n);
+  return d.toISOString().slice(0, 10);
+}
+function formatWeekRange(mondayStr) {
+  const d1 = new Date(mondayStr + 'T00:00:00');
+  const d2 = new Date(addDays(mondayStr, 6) + 'T00:00:00');
+  return `${d1.getDate()} ${monthNames[d1.getMonth()]} → ${d2.getDate()} ${monthNames[d2.getMonth()]}`;
+}
+
+function parseCSV(text) {
+  const lines = text.replace(/\r/g, '').split('\n').filter(l => l.trim().length > 0);
+  if (!lines.length) return [];
+  const splitLine = line => {
+    const out = []; let cur = ''; let inQuotes = false;
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i];
+      if (ch === '"') inQuotes = !inQuotes;
+      else if (ch === ',' && !inQuotes) { out.push(cur); cur = ''; }
+      else cur += ch;
+    }
+    out.push(cur);
+    return out;
+  };
+  const headers = splitLine(lines[0]).map(h => h.trim());
+  return lines.slice(1).map(line => {
+    const vals = splitLine(line);
+    const row = {};
+    headers.forEach((h, i) => { row[h] = (vals[i] ?? '').trim(); });
+    return row;
+  });
+}
+function tzDate(mmddyyyy) {
+  const [m, d, y] = mmddyyyy.split('/');
+  return `${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`;
+}
+
+function buildRoundTripsFromTradeHistory(rows) {
+  const groups = {};
+  rows.forEach(r => {
+    if (!r.Symbol || !r['T/D']) return;
+    const key = `${r.Symbol}__${r['T/D']}`;
+    (groups[key] = groups[key] || []).push(r);
+  });
+
+  const trips = [];
+  Object.values(groups).forEach(fills => {
+    fills.sort((a, b) => a['Exec Time'].localeCompare(b['Exec Time']));
+    let position = 0;
+    let current = null;
+
+    fills.forEach(f => {
+      const qty = Number(f.Qty);
+      const price = Number(f.Price);
+      const net = Number(f['Net Proceeds']);
+      const isSell = f.Side === 'S' || f.Side === 'SS';
+      const delta = isSell ? -qty : qty;
+
+      if (position === 0 && !current) {
+        current = {
+          symbol: f.Symbol,
+          date: tzDate(f['T/D']),
+          side: isSell ? 'short' : 'long',
+          entryFills: [], exitFills: [],
+          pnlFromProceeds: 0,
+          firstTime: f['Exec Time'],
+        };
+      }
+      const openDirectionIsSell = current.side === 'short';
+      const isOpeningFill = isSell === openDirectionIsSell;
+      (isOpeningFill ? current.entryFills : current.exitFills).push({ qty, price, net });
+      current.pnlFromProceeds += net;
+      position += delta;
+
+      if (position === 0) {
+        const sumQtyPrice = arr => arr.reduce((s, x) => s + x.qty * x.price, 0);
+        const sumQty = arr => arr.reduce((s, x) => s + x.qty, 0);
+        const entryQty = sumQty(current.entryFills);
+        const exitQty = sumQty(current.exitFills);
+        trips.push({
+          ticker: current.symbol,
+          date: current.date,
+          side: current.side,
+          entryPrice: entryQty ? sumQtyPrice(current.entryFills) / entryQty : null,
+          exitPrice: exitQty ? sumQtyPrice(current.exitFills) / exitQty : null,
+          qty: entryQty,
+          pnlFromProceeds: current.pnlFromProceeds,
+          time: current.firstTime,
+        });
+        current = null;
+      }
+    });
+    if (current) {
+      const sumQtyPrice = arr => arr.reduce((s, x) => s + x.qty * x.price, 0);
+      const sumQty = arr => arr.reduce((s, x) => s + x.qty, 0);
+      const entryQty = sumQty(current.entryFills);
+      const exitQty = sumQty(current.exitFills);
+      trips.push({
+        ticker: current.symbol,
+        date: current.date,
+        side: current.side,
+        entryPrice: entryQty ? sumQtyPrice(current.entryFills) / entryQty : null,
+        exitPrice: exitQty ? sumQtyPrice(current.exitFills) / exitQty : null,
+        qty: entryQty,
+        pnlFromProceeds: current.pnlFromProceeds,
+        time: current.firstTime,
+        openPosition: true,
+      });
+    }
+  });
+  return trips;
+}
+
+function buildLocateCostMap(rows) {
+  const map = {};
+  rows.forEach(r => {
+    if (r.Type !== 'Locate Fees' || !r.Note) return;
+    const m = r.Note.match(/Locate(?: credit)? \d+ ([A-Z]+) @/);
+    if (!m) return;
+    const ticker = m[1];
+    const date = tzDate(r['E/D']);
+    const key = `${date}__${ticker}`;
+    const withdraw = Number(r.Withdraw) || 0;
+    const deposit = Number(r.Deposit) || 0;
+    map[key] = (map[key] || 0) + withdraw - deposit;
+  });
+  return map;
+}
+
+function getLocateCost(t) {
+  if (typeof t.locateCost === 'number') return t.locateCost;
+  if (t.notes) {
+    const m = t.notes.match(/Locate: -([\d.]+)\$/);
+    if (m) return Number(m[1]);
+  }
+  return 0;
+}
+function getCommission(t) {
+  return typeof t.commission === 'number' ? t.commission : 0;
+}
+
+// ─────────────────────────────────────────────────────────────
+// DEFINIZIONE DEL "TRIANGOLO GIALLO ⚠️"
+// Il triangolo appare su un trade quando ha almeno un tag di
+// esecuzione che NON è tra quelli positivi. I tag positivi sono
+// 'Buon trade' e 'Piano rispettato'. Tutti gli altri tag evento
+// (Uscito presto, Uscito tardi, Distratto, Troppa size, Poca size,
+// Overtrading) segnalano un problema di esecuzione.
+// ─────────────────────────────────────────────────────────────
+const POSITIVE_EVENT_TAGS = ['Buon trade', 'Piano rispettato'];
+function getWarningTags(t) {
+  if (!t.journal?.eventTags?.length) return [];
+  return t.journal.eventTags.filter(e => !POSITIVE_EVENT_TAGS.includes(e));
+}
+
+// ════════════════════════════════════════════════════════════
+// KPI STRIP
+// ════════════════════════════════════════════════════════════
+function KpiStrip({ trades, isDesktop }) {
+  const stats = useMemo(() => {
+    const n = trades.length;
+    const wins = trades.filter(t => t.pnl > 0);
+    const losses = trades.filter(t => t.pnl <= 0);
+    const totalPnl = trades.reduce((s, t) => s + t.pnl, 0);
+    const winrate = n ? wins.length / n : 0;
+    const avgWin = wins.length ? wins.reduce((s, t) => s + t.pnl, 0) / wins.length : 0;
+    const avgLoss = losses.length ? Math.abs(losses.reduce((s, t) => s + t.pnl, 0) / losses.length) : 0;
+    const expectancy = n ? totalPnl / n : 0;
+    const pf = avgLoss > 0 && losses.length ? (avgWin * wins.length) / (avgLoss * losses.length) : 0;
+
+    const sorted = [...trades].sort((a, b) => a.pnl - b.pnl);
+    const worst = sorted[0];
+    const best = sorted[sorted.length - 1];
+
+    const byDate = [...trades].sort((a, b) => a.date.localeCompare(b.date));
+    let curWin = 0, curLoss = 0, maxWinStreak = 0, maxLossStreak = 0;
+    byDate.forEach(t => {
+      if (t.pnl > 0) { curWin++; curLoss = 0; maxWinStreak = Math.max(maxWinStreak, curWin); }
+      else { curLoss++; curWin = 0; maxLossStreak = Math.max(maxLossStreak, curLoss); }
+    });
+
+    return { n, totalPnl, winrate, expectancy, pf, avgWin, avgLoss, best, worst, maxWinStreak, maxLossStreak };
+  }, [trades]);
+
+  const cards = [
+    { label: 'Trade totali', val: String(stats.n), color: C.accent },
+    { label: 'Winrate', val: `${(stats.winrate * 100).toFixed(0)}%`, color: stats.winrate >= 0.5 ? C.profit : C.loss },
+    { label: 'P&L totale', val: fmt$(stats.totalPnl), color: stats.totalPnl >= 0 ? C.profit : C.loss },
+    { label: 'Expectancy', val: `${fmt$(stats.expectancy)}/trade`, color: C.text },
+    { label: 'Profit Factor', val: stats.pf.toFixed(2), color: stats.pf >= 1.5 ? C.profit : C.loss },
+  ];
+
+  const detailCards = stats.n ? [
+    { label: 'Miglior trade', val: fmt$(stats.best.pnl), sub: stats.best.ticker, color: C.profit },
+    { label: 'Peggior trade', val: fmt$(stats.worst.pnl), sub: stats.worst.ticker, color: C.loss },
+    { label: 'Profit medio', val: fmt$(stats.avgWin), sub: 'sui trade vinti', color: C.profit },
+    { label: 'Loss medio', val: `-${stats.avgLoss.toFixed(0)}$`, sub: 'sui trade persi', color: C.loss },
+    { label: 'Streak vincite', val: String(stats.maxWinStreak), sub: 'max consecutive', color: C.profit },
+    { label: 'Streak perdite', val: String(stats.maxLossStreak), sub: 'max consecutive', color: C.loss },
+  ] : [];
+
+  // ── MOBILE: due righe stacked ──
+  if (!isDesktop) {
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 10, minWidth: 0 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))', gap: 10 }}>
+          {cards.map((k, i) => (
+            <div key={i} style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: '12px 14px', minWidth: 0 }}>
+              <div style={{ fontSize: 10, color: C.muted, textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 5 }}>{k.label}</div>
+              <div style={{ fontSize: 18, fontWeight: 800, color: k.color, fontFamily: 'monospace', lineHeight: 1.1 }}>{k.val}</div>
+            </div>
+          ))}
+        </div>
+        {detailCards.length > 0 && (
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(100px, 1fr))', gap: 10 }}>
+            {detailCards.map((k, i) => (
+              <div key={i} style={{ background: C.card2, border: `1px solid ${C.border}`, borderRadius: 12, padding: '10px 12px', minWidth: 0 }}>
+                <div style={{ fontSize: 9, color: C.muted, textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: 5 }}>{k.label}</div>
+                <div style={{ fontSize: 15, fontWeight: 800, color: k.color, fontFamily: 'monospace', lineHeight: 1.1 }}>{k.val}</div>
+                {k.sub && <div style={{ fontSize: 9, color: C.muted, marginTop: 3 }}>{k.sub}</div>}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // ── DESKTOP: due griglie affiancate (5 KPI | 6 dettagli) ──
+  return (
+    <div style={{ display: 'grid', gridTemplateColumns: '1.5fr 1fr', gap: 12, minWidth: 0 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 12, minWidth: 0 }}>
+        {cards.map((k, i) => (
+          <div key={i} style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: '14px 14px', minWidth: 0 }}>
+            <div style={{ fontSize: 11, color: C.muted, textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: 6, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{k.label}</div>
+            <div style={{ fontSize: 22, fontWeight: 800, color: k.color, fontFamily: 'monospace', lineHeight: 1.1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{k.val}</div>
+          </div>
+        ))}
+      </div>
+      {detailCards.length > 0 ? (
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12, minWidth: 0 }}>
+          {detailCards.map((k, i) => (
+            <div key={i} style={{ background: C.card2, border: `1px solid ${C.border}`, borderRadius: 12, padding: '10px 12px', minWidth: 0 }}>
+              <div style={{ fontSize: 10, color: C.muted, textTransform: 'uppercase', letterSpacing: '.04em', marginBottom: 4, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{k.label}</div>
+              <div style={{ fontSize: 16, fontWeight: 800, color: k.color, fontFamily: 'monospace', lineHeight: 1.1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{k.val}</div>
+              {k.sub && <div style={{ fontSize: 11, color: C.muted, marginTop: 2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{k.sub}</div>}
+            </div>
+          ))}
+        </div>
+      ) : <div />}
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════════════════
+// CALENDARIO
+// ════════════════════════════════════════════════════════════
+function MonthCalendar({ trades, onDayClick, isDesktop, cursor, setCursor }) {
+  const dayData = useMemo(() => {
+    const map = {};
+    trades.forEach(t => {
+      const key = t.date;
+      if (!map[key]) map[key] = { pnl: 0, count: 0 };
+      map[key].pnl += t.pnl;
+      map[key].count += 1;
+    });
+    return map;
+  }, [trades]);
+
+  const first = new Date(cursor.y, cursor.m, 1);
+  const startOffset = (first.getDay() + 6) % 7;
+  const daysInMonth = new Date(cursor.y, cursor.m + 1, 0).getDate();
+
+  const cells = [];
+  for (let i = 0; i < startOffset; i++) cells.push(null);
+  for (let d = 1; d <= daysInMonth; d++) cells.push(d);
+
+  const monthTotal = Object.entries(dayData)
+    .filter(([k]) => k.startsWith(`${cursor.y}-${String(cursor.m + 1).padStart(2, '0')}`))
+    .reduce((s, [, v]) => s + v.pnl, 0);
+
+  const intensity = pnl => 0.15 + Math.min(Math.abs(pnl) / 300, 1) * 0.55;
+
+  return (
+    <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: isDesktop ? 22 : 14 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
+        <button onClick={() => setCursor(c => c.m === 0 ? { y: c.y - 1, m: 11 } : { y: c.y, m: c.m - 1 })} style={navBtnStyle}>‹</button>
+        <div style={{ textAlign: 'center' }}>
+          <div style={{ fontWeight: 800, fontSize: isDesktop ? 22 : 17, color: C.text }}>{monthNames[cursor.m]} {cursor.y}</div>
+          <div style={{ fontSize: isDesktop ? 17 : 14, fontFamily: 'monospace', color: monthTotal >= 0 ? C.profit : C.loss, marginTop: 3, fontWeight: 700 }}>{fmt$(monthTotal)}</div>
+        </div>
+        <button onClick={() => setCursor(c => c.m === 11 ? { y: c.y + 1, m: 0 } : { y: c.y, m: c.m + 1 })} style={navBtnStyle}>›</button>
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 6, marginBottom: 6 }}>
+        {dayLabels.map((d, i) => (<div key={i} style={{ textAlign: 'center', fontSize: 13, color: C.muted, fontWeight: 700 }}>{d}</div>))}
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 6 }}>
+        {cells.map((d, i) => {
+          if (d === null) return <div key={i} />;
+          const key = `${cursor.y}-${String(cursor.m + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+          const info = dayData[key];
+          const has = info !== undefined;
+          const bg = !has ? C.card2 : info.pnl >= 0 ? `rgba(95,216,143,${intensity(info.pnl)})` : `rgba(255,138,128,${intensity(info.pnl)})`;
+          return (
+            <div key={i} onClick={() => has && onDayClick(key)} style={{
+              aspectRatio: '1.35', borderRadius: 8, background: bg,
+              border: `1px solid ${has ? 'transparent' : C.border}`,
+              display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+              cursor: has ? 'pointer' : 'default', padding: 4,
+            }}>
+              <span style={{ fontSize: isDesktop ? 22 : 16, color: has ? C.text : C.muted, fontWeight: 800, lineHeight: 1 }}>{d}</span>
+              {has && (<>
+                <span style={{ fontSize: isDesktop ? 17 : 13, fontFamily: 'monospace', fontWeight: 800, color: info.pnl >= 0 ? C.profit : C.loss, marginTop: 4, lineHeight: 1 }}>
+                  {info.pnl >= 0 ? '+' : ''}{Math.round(info.pnl)}
+                </span>
+                <span style={{ fontSize: isDesktop ? 13 : 10, color: C.muted, marginTop: 3, lineHeight: 1 }}>{info.count} tr.</span>
+              </>)}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+const navBtnStyle = { width: 34, height: 34, borderRadius: 6, border: `1px solid ${C.border}`, background: C.card2, color: C.text, cursor: 'pointer', fontSize: 20 };
+
+function MonthMini({ year, month, dayPnl, onDayClick }) {
+  const first = new Date(year, month, 1);
+  const startOffset = (first.getDay() + 6) % 7;
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+  const cells = [];
+  for (let i = 0; i < startOffset; i++) cells.push(null);
+  for (let d = 1; d <= daysInMonth; d++) cells.push(d);
+
+  const monthTotal = Object.entries(dayPnl).filter(([k]) => k.startsWith(`${year}-${String(month + 1).padStart(2, '0')}`)).reduce((s, [, v]) => s + v.pnl, 0);
+  const hasTrades = Object.keys(dayPnl).some(k => k.startsWith(`${year}-${String(month + 1).padStart(2, '0')}`));
+  const intensity = pnl => 0.15 + Math.min(Math.abs(pnl) / 300, 1) * 0.55;
+
+  return (
+    <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, padding: 12 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 8 }}>
+        <span style={{ fontSize: 14, fontWeight: 800, color: C.text }}>{monthNames[month]} {year}</span>
+        <span style={{ fontSize: 13, fontFamily: 'monospace', fontWeight: 700, color: hasTrades ? (monthTotal >= 0 ? C.profit : C.loss) : C.muted }}>
+          {hasTrades ? fmt$(monthTotal) : '—'}
+        </span>
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 3, marginBottom: 3 }}>
+        {dayLabels.map((d, i) => (<div key={i} style={{ textAlign: 'center', fontSize: 9, color: C.muted, fontWeight: 700 }}>{d}</div>))}
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 3 }}>
+        {cells.map((d, i) => {
+          if (d === null) return <div key={i} />;
+          const key = `${year}-${String(month + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+          const info = dayPnl[key];
+          const has = info !== undefined;
+          const bg = !has ? C.card2 : info.pnl >= 0 ? `rgba(95,216,143,${intensity(info.pnl)})` : `rgba(255,138,128,${intensity(info.pnl)})`;
+          return (
+            <div key={i} onClick={() => has && onDayClick && onDayClick(key)}
+              title={has ? `${key}: ${fmt$(info.pnl)} (${info.count} tr.)` : key}
+              style={{
+                aspectRatio: '1', borderRadius: 4, background: bg,
+                border: `1px solid ${has ? 'transparent' : C.border}`,
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                cursor: has && onDayClick ? 'pointer' : 'default',
+              }}>
+              <span style={{ fontSize: 10, color: has ? C.text : C.muted, fontWeight: 700 }}>{d}</span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function LastMonthsSidebar({ trades, onDayClick }) {
+  const dayPnl = useMemo(() => {
+    const map = {};
+    trades.forEach(t => {
+      if (!map[t.date]) map[t.date] = { pnl: 0, count: 0 };
+      map[t.date].pnl += t.pnl;
+      map[t.date].count += 1;
+    });
+    return map;
+  }, [trades]);
+
+  const months = useMemo(() => {
+    const now = new Date();
+    const out = [];
+    for (let i = 1; i <= 2; i++) {
+      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+      out.push({ y: d.getFullYear(), m: d.getMonth() });
+    }
+    return out;
+  }, []);
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <div style={{ fontSize: 12, color: C.muted, textTransform: 'uppercase', letterSpacing: '.07em', fontWeight: 700 }}>Ultimi 2 mesi</div>
+      {months.map(({ y, m }) => (<MonthMini key={`${y}-${m}`} year={y} month={m} dayPnl={dayPnl} onDayClick={onDayClick} />))}
+    </div>
+  );
+}
+
+function YearView({ trades, onDayClick }) {
+  const [year, setYear] = useState(() => new Date().getFullYear());
+  const dayData = useMemo(() => {
+    const map = {};
+    trades.forEach(t => {
+      if (!map[t.date]) map[t.date] = { pnl: 0, count: 0 };
+      map[t.date].pnl += t.pnl;
+      map[t.date].count += 1;
+    });
+    return map;
+  }, [trades]);
+
+  const yearTotal = Object.entries(dayData).filter(([k]) => k.startsWith(String(year))).reduce((s, [, v]) => s + v.pnl, 0);
+  const yearTrades = Object.entries(dayData).filter(([k]) => k.startsWith(String(year))).reduce((s, [, v]) => s + v.count, 0);
+
+  return (
+    <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: 22 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 18 }}>
+        <button onClick={() => setYear(y => y - 1)} style={navBtnStyle}>‹</button>
+        <div style={{ textAlign: 'center' }}>
+          <div style={{ fontWeight: 800, fontSize: 22, color: C.text }}>{year}</div>
+          <div style={{ fontSize: 17, fontFamily: 'monospace', fontWeight: 700, color: yearTotal >= 0 ? C.profit : C.loss, marginTop: 3 }}>{fmt$(yearTotal)} · {yearTrades} trade</div>
+        </div>
+        <button onClick={() => setYear(y => y + 1)} style={navBtnStyle}>›</button>
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(340px, 1fr))', gap: 14 }}>
+        {Array.from({ length: 12 }, (_, m) => (<MonthMini key={m} year={year} month={m} dayPnl={dayData} onDayClick={onDayClick} />))}
+      </div>
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════════════════
+// TAG HELPERS
+// ════════════════════════════════════════════════════════════
+function getTags(trade) {
+  if (trade.tags && trade.tags.length) return trade.tags;
+  if (trade.strategy && trade.strategy !== 'Non taggato') return [trade.strategy];
+  return [];
+}
+
+function groupByTags(trades) {
+  const map = {};
+  trades.forEach(t => {
+    const tags = getTags(t);
+    const keys = tags.length ? tags : ['Non taggato'];
+    keys.forEach(k => (map[k] = map[k] || []).push(t));
+  });
+  return Object.entries(map).map(([tag, list]) => {
+    const n = list.length;
+    const wins = list.filter(t => t.pnl > 0);
+    const losses = list.filter(t => t.pnl <= 0);
+    const totalPnl = list.reduce((s, t) => s + t.pnl, 0);
+    const winrate = n ? wins.length / n : 0;
+    const avgWin = wins.length ? wins.reduce((s, t) => s + t.pnl, 0) / wins.length : 0;
+    const avgLoss = losses.length ? Math.abs(losses.reduce((s, t) => s + t.pnl, 0) / losses.length) : 0;
+    const pf = avgLoss > 0 && losses.length ? (avgWin * wins.length) / (avgLoss * losses.length) : 0;
+    return { tag, n, totalPnl, winrate, avgPnl: n ? totalPnl / n : 0, pf };
+  }).sort((a, b) => b.totalPnl - a.totalPnl);
+}
+
+function TagInput({ tags, onChange, suggestions = [] }) {
+  const [input, setInput] = useState('');
+  const [listId] = useState(() => `taglist-${Math.random().toString(36).slice(2)}`);
+  const addTag = () => { const v = input.trim(); if (v && !tags.includes(v)) onChange([...tags, v]); setInput(''); };
+  const removeTag = t => onChange(tags.filter(x => x !== t));
+
+  return (
+    <div>
+      {tags.length > 0 && (
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5, marginBottom: 6 }}>
+          {tags.map(t => (
+            <span key={t} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, padding: '5px 12px', borderRadius: 12, fontSize: 13, fontWeight: 700, background: `${C.accent}18`, border: `1px solid ${C.accent}44`, color: C.accent }}>
+              {t}<span onClick={() => removeTag(t)} style={{ cursor: 'pointer', fontWeight: 900 }}>×</span>
+            </span>
+          ))}
+        </div>
+      )}
+      <input type="text" list={listId} value={input} onChange={e => setInput(e.target.value)}
+        onKeyDown={e => { if (e.key === 'Enter' || e.key === ',') { e.preventDefault(); addTag(); } }}
+        onBlur={addTag} placeholder="Aggiungi tag e premi invio…"
+        style={{ background: C.card2, border: `1px solid ${C.border}`, color: C.text, borderRadius: 6, padding: '8px 11px', fontSize: 14, width: '100%', fontFamily: 'inherit' }} />
+      <datalist id={listId}>{suggestions.filter(s => !tags.includes(s)).map(s => <option key={s} value={s} />)}</datalist>
+    </div>
+  );
+}
+
+const ENTRY_TAGS = ['FOMO', 'Anticipo VWAP', 'Recupero dopo minimo', 'Statistiche short', 'Wash', 'Rottura e retest', '5 pilastri'];
+const EVENT_TAGS = ['Buon trade', 'Piano rispettato', 'Uscito presto', 'Uscito tardi', 'Distratto', 'Troppa size', 'Poca size', 'Overtrading'];
+
+function TagMenu({ label, options, selected, onToggle, positiveTags = [] }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div style={{ position: 'relative' }} tabIndex={0}
+      onBlur={e => { if (!e.currentTarget.contains(e.relatedTarget)) setOpen(false); }}>
+      <div style={{ fontSize: 12, color: C.muted, marginBottom: 6 }}>{label}</div>
+      {selected.length > 0 && (
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5, marginBottom: 6 }}>
+          {selected.map(tag => {
+            const isPositive = positiveTags.includes(tag);
+            return (
+              <span key={tag} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, padding: '5px 12px', borderRadius: 12, fontSize: 13, fontWeight: 700, background: isPositive ? `${C.profit}18` : `${C.loss}18`, border: `1px solid ${isPositive ? C.profit : C.loss}44`, color: isPositive ? C.profit : C.loss }}>
+                {tag}<span onClick={() => onToggle(tag)} style={{ cursor: 'pointer', fontWeight: 900 }}>×</span>
+              </span>
+            );
+          })}
+        </div>
+      )}
+      <button type="button" onClick={() => setOpen(o => !o)} style={{ width: '100%', textAlign: 'left', display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 12px', borderRadius: 6, cursor: 'pointer', fontSize: 14, border: `1px solid ${C.border}`, background: C.card2, color: C.muted }}>
+        <span>{selected.length ? `${selected.length} selezionati — modifica` : 'Seleziona…'}</span>
+        <span style={{ fontSize: 12 }}>{open ? '▲' : '▼'}</span>
+      </button>
+      {open && (
+        <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, zIndex: 60, marginTop: 4, background: C.card2, border: `1px solid ${C.border}`, borderRadius: 8, boxShadow: '0 10px 26px rgba(0,0,0,0.45)', maxHeight: 280, overflowY: 'auto' }}>
+          {options.map(tag => {
+            const active = selected.includes(tag);
+            const isPositive = positiveTags.includes(tag);
+            return (
+              <div key={tag} onClick={() => onToggle(tag)} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '9px 12px', cursor: 'pointer', background: active ? `${isPositive ? C.profit : C.accent}12` : 'transparent' }}>
+                <input type="checkbox" checked={active} readOnly style={{ pointerEvents: 'none', width: 16, height: 16 }} />
+                <span style={{ fontSize: 14, color: active ? C.text : C.muted }}>{tag}</span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function JournalFields({ journal, onChange }) {
+  const j = journal || {};
+  const toggle = (field, tag) => {
+    const current = j[field] || [];
+    onChange({ ...j, [field]: current.includes(tag) ? current.filter(x => x !== tag) : [...current, tag] });
+  };
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12, background: 'rgba(126,200,227,0.04)', border: `1px solid ${C.border}`, borderRadius: 8, padding: 14 }}>
+      <div style={{ fontSize: 12, color: C.accent, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.06em' }}>🧠 Journaling</div>
+      <TagMenu label="Perché sei entrato?" options={ENTRY_TAGS} selected={j.entryTags || []} onToggle={tag => toggle('entryTags', tag)} />
+      <TagMenu label="Cosa è successo?" options={EVENT_TAGS} selected={j.eventTags || []} onToggle={tag => toggle('eventTags', tag)} positiveTags={POSITIVE_EVENT_TAGS} />
+    </div>
+  );
+}
+
+function compressImage(file, maxWidth = 1400, quality = 0.85) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = e => {
+      const img = new Image();
+      img.onload = async () => {
+        const scale = Math.min(1, maxWidth / img.width);
+        const canvas = document.createElement('canvas');
+        canvas.width = img.width * scale;
+        canvas.height = img.height * scale;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+
+        canvas.toBlob(async (blob) => {
+          try {
+            const filename = `${Date.now()}-${Math.random().toString(36).slice(2)}.jpg`;
+            const { error } = await sb.storage
+              .from('journal-screenshots')
+              .upload(filename, blob, { contentType: 'image/jpeg' });
+            if (error) { reject(error); return; }
+            const { data } = sb.storage.from('journal-screenshots').getPublicUrl(filename);
+            resolve(data.publicUrl);
+          } catch (err) { reject(err); }
+        }, 'image/jpeg', quality);
+      };
+      img.onerror = reject;
+      img.src = e.target.result;
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+function ChartImageInput({ value, onChange, small = false, inline = false }) {
+  const [busy, setBusy] = useState(false);
+  const [zoomOpen, setZoomOpen] = useState(false);
+  const handleFile = async file => {
+    if (!file) return;
+    setBusy(true);
+    try { const compressed = await compressImage(file); onChange(compressed); }
+    finally { setBusy(false); }
+  };
+  const maxH = small ? 160 : (inline ? 42 : 80);
+
+  if (inline) {
+    return (
+      <div>
+        {!value ? (
+          <label style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, padding: '9px 12px', borderRadius: 6, cursor: 'pointer', border: `1px dashed ${C.border}`, background: C.card2, color: C.muted, fontSize: 13, fontWeight: 700, height: 42, width: '100%' }}>
+            {busy ? '…' : '📷 Screenshot'}
+            <input type="file" accept="image/*" style={{ display: 'none' }} onChange={e => handleFile(e.target.files[0])} />
+          </label>
+        ) : (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, height: 42 }}>
+            <img src={value} onClick={() => setZoomOpen(true)} alt="chart" style={{ height: 42, width: 42, objectFit: 'cover', borderRadius: 6, border: `1px solid ${C.border}`, cursor: 'zoom-in', flexShrink: 0 }} />
+            <label style={{ fontSize: 12, color: C.accent, cursor: 'pointer', fontWeight: 700, flexShrink: 0 }}>
+              Sostituisci<input type="file" accept="image/*" style={{ display: 'none' }} onChange={e => handleFile(e.target.files[0])} />
+            </label>
+            <span onClick={() => onChange(null)} style={{ fontSize: 12, color: C.loss, cursor: 'pointer', fontWeight: 700, flexShrink: 0 }}>Rimuovi</span>
+            {zoomOpen && (
+              <div onClick={() => setZoomOpen(false)} style={{ position: 'fixed', inset: 0, zIndex: 300, background: 'rgba(0,0,0,0.8)', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'zoom-out', padding: 20 }}>
+                <img src={value} alt="chart" style={{ maxWidth: '95%', maxHeight: '95%', borderRadius: 8 }} />
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <div style={{ fontSize: 12, color: C.muted, marginBottom: 5 }}>Screenshot grafico (opzionale)</div>
+      {!value ? (
+        <label style={{ display: 'inline-block', padding: '10px 16px', borderRadius: 6, cursor: 'pointer', border: `1px dashed ${C.border}`, background: C.card2, color: C.muted, fontSize: 13, fontWeight: 700 }}>
+          {busy ? 'Compressione…' : '📷 Carica screenshot'}
+          <input type="file" accept="image/*" style={{ display: 'none' }} onChange={e => handleFile(e.target.files[0])} />
+        </label>
+      ) : (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <img src={value} onClick={() => setZoomOpen(true)} alt="chart" style={{ maxHeight: maxH, height: 'auto', borderRadius: 6, border: `1px solid ${C.border}`, cursor: 'zoom-in', display: 'block' }} />
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <label style={{ fontSize: 13, color: C.accent, cursor: 'pointer', fontWeight: 700 }}>
+              Sostituisci<input type="file" accept="image/*" style={{ display: 'none' }} onChange={e => handleFile(e.target.files[0])} />
+            </label>
+            <span onClick={() => onChange(null)} style={{ fontSize: 13, color: C.loss, cursor: 'pointer', fontWeight: 700 }}>Rimuovi</span>
+          </div>
+        </div>
+      )}
+      {zoomOpen && (
+        <div onClick={() => setZoomOpen(false)} style={{ position: 'fixed', inset: 0, zIndex: 300, background: 'rgba(0,0,0,0.8)', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'zoom-out', padding: 20 }}>
+          <img src={value} alt="chart" style={{ maxWidth: '95%', maxHeight: '95%', borderRadius: 8 }} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════════════════
+// FORM AGGIUNTA TRADE
+// ════════════════════════════════════════════════════════════
+function AddTradeForm({ onAddTrade, onAddNote, allTags = [], onClose, isDesktop }) {
+  const [mode, setMode] = useState('quick');
+  const emptyForm = { date: '', ticker: '', side: 'short', entryPrice: '', exitPrice: '', pnl: '', locateCost: '', commission: '', notes: '', time: '' };
+  const [f, setF] = useState(emptyForm);
+  const [tags, setTags] = useState([]);
+  const [journal, setJournal] = useState({});
+  const [chartImage, setChartImage] = useState(null);
+
+  const reset = () => { setF(emptyForm); setTags([]); setJournal({}); setChartImage(null); setMode('quick'); if (onClose) onClose(); };
+
+  const submitFull = () => {
+    if (!f.date || !f.ticker || f.pnl === '') return;
+    onAddTrade({
+      id: uuid(), date: f.date, ticker: f.ticker.toUpperCase(), tags, side: f.side,
+      entryPrice: f.entryPrice ? Number(f.entryPrice) : null,
+      exitPrice: f.exitPrice ? Number(f.exitPrice) : null,
+      time: f.time || null, pnl: Number(f.pnl),
+      locateCost: f.locateCost ? Number(f.locateCost) : 0,
+      commission: f.commission ? Number(f.commission) : 0,
+      notes: f.notes, journal, chartImage,
+    });
+    reset();
+  };
+  const submitQuick = () => {
+    if (!f.date || !f.ticker) return;
+    onAddNote({ id: uuid(), date: f.date, ticker: f.ticker.toUpperCase(), notes: f.notes, journal, chartImage, used: false });
+    reset();
+  };
+
+  const inputStyle = { background: C.card2, border: `1px solid ${C.border}`, color: C.text, borderRadius: 6, padding: '9px 12px', fontSize: 14, fontFamily: 'inherit', width: '100%' };
+  const labelStyle = { fontSize: 12, color: C.muted, marginBottom: 5, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.04em' };
+
+  return (
+    <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: isDesktop ? 22 : 14, display: 'flex', flexDirection: 'column', gap: 16 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <div style={{ display: 'flex', gap: 6 }}>
+          {[['quick', '⚡ Solo nota (pre-import)'], ['full', '📄 Trade completo']].map(([v, l]) => (
+            <button key={v} onClick={() => setMode(v)} style={{ padding: '8px 14px', borderRadius: 6, cursor: 'pointer', fontSize: 13, fontWeight: 700, border: `1px solid ${mode === v ? C.accent : C.border}`, background: mode === v ? `${C.accent}15` : C.card2, color: mode === v ? C.accent : C.muted }}>{l}</button>
+          ))}
+        </div>
+        <button onClick={reset} title="Chiudi" style={{ width: 32, height: 32, borderRadius: 6, border: `1px solid ${C.border}`, background: C.card2, color: C.muted, cursor: 'pointer', fontSize: 16 }}>✕</button>
+      </div>
+
+      {mode === 'quick' ? (
+        <>
+          <div style={{ display: 'grid', gridTemplateColumns: isDesktop ? '160px 140px 1fr' : '1fr 1fr', gap: 14, alignItems: 'end' }}>
+            <div><div style={labelStyle}>Data</div><input type="date" value={f.date} onChange={e => setF({ ...f, date: e.target.value })} style={inputStyle} /></div>
+            <div><div style={labelStyle}>Ticker</div><input type="text" value={f.ticker} onChange={e => setF({ ...f, ticker: e.target.value.toUpperCase() })} style={inputStyle} /></div>
+            <div style={{ gridColumn: isDesktop ? 'auto' : '1 / -1' }}>
+              <div style={labelStyle}>Screenshot</div>
+              <ChartImageInput value={chartImage} onChange={setChartImage} inline />
+            </div>
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: isDesktop ? '1fr 1fr' : '1fr', gap: 16 }}>
+            <JournalFields journal={journal} onChange={setJournal} />
+            <div>
+              <div style={labelStyle}>Note libere</div>
+              <textarea value={f.notes} onChange={e => setF({ ...f, notes: e.target.value })} rows={isDesktop ? 10 : 4} placeholder="Scrivi qui le tue sensazioni sul trade…" style={{ ...inputStyle, resize: 'vertical', lineHeight: 1.55, minHeight: isDesktop ? 240 : 100 }} />
+            </div>
+          </div>
+        </>
+      ) : (
+        <>
+          <div style={{ display: 'grid', gridTemplateColumns: isDesktop ? 'repeat(4, 1fr)' : 'repeat(2, 1fr)', gap: 14 }}>
+            <div><div style={labelStyle}>Data</div><input type="date" value={f.date} onChange={e => setF({ ...f, date: e.target.value })} style={inputStyle} /></div>
+            <div><div style={labelStyle}>Ticker</div><input type="text" value={f.ticker} onChange={e => setF({ ...f, ticker: e.target.value.toUpperCase() })} style={inputStyle} /></div>
+            <div><div style={labelStyle}>Ora entry</div><input type="time" value={f.time} onChange={e => setF({ ...f, time: e.target.value })} style={inputStyle} /></div>
+            <div>
+              <div style={labelStyle}>Side</div>
+              <div style={{ display: 'flex', gap: 6 }}>
+                {['short', 'long'].map(s => (
+                  <button key={s} onClick={() => setF({ ...f, side: s })} style={{ flex: 1, padding: '9px 12px', borderRadius: 6, fontSize: 13, fontWeight: 700, cursor: 'pointer', border: `1px solid ${f.side === s ? C.accent : C.border}`, background: f.side === s ? `${C.accent}18` : C.card2, color: f.side === s ? C.accent : C.muted }}>{s === 'short' ? 'Short' : 'Long'}</button>
+                ))}
+              </div>
+            </div>
+            <div><div style={labelStyle}>Entry $</div><input type="number" value={f.entryPrice} onChange={e => setF({ ...f, entryPrice: e.target.value })} style={inputStyle} /></div>
+            <div><div style={labelStyle}>Exit $</div><input type="number" value={f.exitPrice} onChange={e => setF({ ...f, exitPrice: e.target.value })} style={inputStyle} /></div>
+            <div><div style={labelStyle}>PnL netto $</div><input type="number" value={f.pnl} onChange={e => setF({ ...f, pnl: e.target.value })} style={inputStyle} /></div>
+            <div><div style={labelStyle}>Locate $</div><input type="number" value={f.locateCost} onChange={e => setF({ ...f, locateCost: e.target.value })} style={inputStyle} placeholder="0" /></div>
+            <div><div style={labelStyle}>Commissioni $</div><input type="number" value={f.commission} onChange={e => setF({ ...f, commission: e.target.value })} style={inputStyle} placeholder="0" /></div>
+            <div style={{ gridColumn: isDesktop ? 'span 3' : '1 / -1' }}>
+              <div style={labelStyle}>Screenshot</div>
+              <ChartImageInput value={chartImage} onChange={setChartImage} inline />
+            </div>
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: isDesktop ? '1fr 1fr' : '1fr', gap: 16 }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+              <div><div style={labelStyle}>Tag / Setup</div><TagInput tags={tags} onChange={setTags} suggestions={allTags} /></div>
+              <JournalFields journal={journal} onChange={setJournal} />
+            </div>
+            <div>
+              <div style={labelStyle}>Note libere</div>
+              <textarea value={f.notes} onChange={e => setF({ ...f, notes: e.target.value })} rows={isDesktop ? 10 : 4} placeholder="Scrivi qui le tue riflessioni…" style={{ ...inputStyle, resize: 'vertical', lineHeight: 1.55, minHeight: isDesktop ? 240 : 100 }} />
+            </div>
+          </div>
+        </>
+      )}
+
+      <div style={{ display: 'flex', gap: 8 }}>
+        <button onClick={mode === 'full' ? submitFull : submitQuick} style={{ padding: '9px 20px', borderRadius: 6, border: 'none', background: C.profit, color: '#06120a', fontWeight: 800, fontSize: 13, cursor: 'pointer' }}>Salva {mode === 'quick' ? 'nota' : 'trade'}</button>
+        <button onClick={reset} style={{ padding: '9px 20px', borderRadius: 6, border: `1px solid ${C.border}`, background: 'transparent', color: C.muted, fontSize: 13, cursor: 'pointer' }}>Annulla</button>
+      </div>
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════════════════
+// TRADE LOG
+// ════════════════════════════════════════════════════════════
+function TradeLog({ trades, onUpdate, onDelete, onDuplicate, allTags = [], isDesktop }) {
+  const [expandedId, setExpandedId] = useState(null);
+  const [noteDraft, setNoteDraft] = useState('');
+  const [tagsDraft, setTagsDraft] = useState([]);
+  const [journalDraft, setJournalDraft] = useState({});
+  const [chartImageDraft, setChartImageDraft] = useState(null);
+
+  const sorted = useMemo(() => [...trades].sort((a, b) => a.date.localeCompare(b.date)), [trades]);
+  const equityCurve = useMemo(() => {
+    let cum = 0;
+    return sorted.map((t, i) => { cum += t.pnl; return { index: i + 1, value: cum, pnl: t.pnl, date: t.date, ticker: t.ticker }; });
+  }, [sorted]);
+
+  const chartData = useMemo(() => {
+    if (equityCurve.length < 2) return equityCurve;
+    return equityCurve.map((p, i) => {
+      const row = { ...p };
+      for (let j = 0; j < equityCurve.length - 1; j++) row[`seg${j}`] = (i === j || i === j + 1) ? p.value : null;
+      return row;
+    });
+  }, [equityCurve]);
+
+  const segments = useMemo(() => {
+    const out = [];
+    for (let j = 0; j < equityCurve.length - 1; j++) out.push({ key: `seg${j}`, color: equityCurve[j + 1].pnl >= 0 ? C.profit : C.loss });
+    return out;
+  }, [equityCurve]);
+
+  const toggleExpand = t => {
+    if (expandedId === t.id) { setExpandedId(null); return; }
+    setExpandedId(t.id);
+    setNoteDraft(t.notes || '');
+    setTagsDraft(getTags(t));
+    setJournalDraft(t.journal || {});
+    setChartImageDraft(t.chartImage || null);
+  };
+
+  const saveNote = t => { onUpdate({ ...t, notes: noteDraft, tags: tagsDraft, journal: journalDraft, chartImage: chartImageDraft }); };
+
+  const renderEquityDot = (props) => {
+    const { cx, cy, payload, key } = props;
+    if (cx == null || cy == null || !payload || payload.value == null) return null;
+    const color = payload.pnl >= 0 ? C.profit : C.loss;
+    return <circle key={key} cx={cx} cy={cy} r={4} fill={color} stroke={C.card} strokeWidth={1.2} />;
+  };
+
+  const rowPad = isDesktop ? '16px 22px' : '12px 16px';
+  const W_DATE = isDesktop ? 100 : 80;
+  const W_TICKER = isDesktop ? 80 : 60;
+  const W_NUM = isDesktop ? 82 : 0;
+  const W_PNL = isDesktop ? 90 : 78;
+  const numLabelStyle = { fontSize: 10, color: C.muted, textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: 2, fontWeight: 700 };
+  const numValStyle = { fontSize: 14, fontWeight: 700, fontFamily: 'monospace', lineHeight: 1 };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: isDesktop ? '20px 22px' : '14px 16px' }}>
+        <div style={{ fontSize: 12, color: C.muted, textTransform: 'uppercase', letterSpacing: '.07em', marginBottom: 12, fontWeight: 700 }}>
+          Equity curve <span style={{ color: C.profit }}>●</span> vincente <span style={{ color: C.loss, marginLeft: 8 }}>●</span> perdente
+        </div>
+        {equityCurve.length > 1 ? (
+          <ResponsiveContainer width="100%" height={isDesktop ? 210 : 160}>
+            <AreaChart data={chartData} margin={{ top: 8, right: 8, bottom: 4, left: 0 }}>
+              <XAxis dataKey="index" tick={{ fontSize: 11, fill: C.muted }} axisLine={false} tickLine={false} />
+              <YAxis tick={{ fontSize: 11, fill: C.muted }} axisLine={false} tickLine={false} tickFormatter={v => `${v}$`} width={50} />
+              <Tooltip contentStyle={{ background: C.card2, border: `1px solid ${C.border}`, borderRadius: 8, fontSize: 13 }}
+                formatter={(v) => [`${Number(v).toFixed(0)}$`, 'Equity']}
+                labelFormatter={(label, payload) => {
+                  if (payload && payload[0]) { const p = payload[0].payload; return `#${p.index} · ${p.ticker} · ${p.pnl >= 0 ? '+' : ''}${p.pnl.toFixed(0)}$`; }
+                  return `Trade #${label}`;
+                }} />
+              <ReferenceLine y={0} stroke={C.border} strokeDasharray="4 4" />
+              <Area type="linear" dataKey="value" stroke="transparent" strokeWidth={0} fill="none" dot={renderEquityDot} isAnimationActive={false} />
+              {segments.map(s => (<Area key={s.key} type="linear" dataKey={s.key} stroke={s.color} strokeWidth={2.5} fill={s.color} fillOpacity={0.13} dot={false} activeDot={false} isAnimationActive={false} connectNulls={false} baseValue={0} />))}
+            </AreaChart>
+          </ResponsiveContainer>
+        ) : (
+          <div style={{ fontSize: 14, color: C.muted, padding: '20px 0', textAlign: 'center' }}>Aggiungi almeno 2 trade per vedere la curva</div>
+        )}
+      </div>
+
+      <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, overflow: 'hidden' }}>
+        <div style={{ padding: isDesktop ? '14px 22px' : '12px 16px', background: C.card2, fontSize: 12, color: C.muted, textTransform: 'uppercase', letterSpacing: '.07em', fontWeight: 700 }}>
+          Trade ({sorted.length})
+        </div>
+        {sorted.length === 0 && (<div style={{ padding: 20, textAlign: 'center', fontSize: 14, color: C.muted }}>Nessun trade registrato</div>)}
+        {[...sorted].reverse().map(t => {
+          const locate = getLocateCost(t);
+          const commission = getCommission(t);
+          const warningTags = getWarningTags(t);
+          const hasWarning = warningTags.length > 0;
+          return (
+            <div key={t.id} style={{ borderTop: `1px solid ${C.border}` }}>
+              <div onClick={() => toggleExpand(t)} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: rowPad, cursor: 'pointer' }}>
+                <span style={{ fontSize: isDesktop ? 14 : 12, color: C.muted, width: W_DATE, flexShrink: 0, fontFamily: 'monospace' }}>{t.date}</span>
+                <span style={{ fontSize: isDesktop ? 17 : 13, fontWeight: 800, color: C.text, width: W_TICKER, flexShrink: 0 }}>{t.ticker}</span>
+                <span style={{ fontSize: 11, fontWeight: 800, padding: '3px 8px', borderRadius: 4, flexShrink: 0, width: 58, textAlign: 'center', background: t.side === 'short' ? 'rgba(255,138,128,0.15)' : 'rgba(95,216,143,0.15)', color: t.side === 'short' ? C.loss : C.profit }}>{t.side === 'short' ? 'SHORT' : 'LONG'}</span>
+                <div style={{ display: 'flex', gap: 4, flex: 1, overflow: 'hidden', minWidth: 0 }}>
+                  {getTags(t).slice(0, isDesktop ? 2 : 1).map(tag => (<span key={tag} style={{ fontSize: 11, fontWeight: 700, padding: '3px 9px', borderRadius: 8, background: `${C.accent}18`, color: C.accent, whiteSpace: 'nowrap' }}>{tag}</span>))}
+                  {getTags(t).length > (isDesktop ? 2 : 1) && <span style={{ fontSize: 11, color: C.muted }}>+{getTags(t).length - (isDesktop ? 2 : 1)}</span>}
+                </div>
+                {isDesktop && (<>
+                  <div style={{ width: W_NUM, textAlign: 'right', flexShrink: 0 }}><div style={numLabelStyle}>Entry</div><div style={{ ...numValStyle, color: C.text }}>{t.entryPrice != null ? `$${t.entryPrice.toFixed(2)}` : '—'}</div></div>
+                  <div style={{ width: W_NUM, textAlign: 'right', flexShrink: 0 }}><div style={numLabelStyle}>Exit</div><div style={{ ...numValStyle, color: C.text }}>{t.exitPrice != null ? `$${t.exitPrice.toFixed(2)}` : '—'}</div></div>
+                  <div style={{ width: W_NUM, textAlign: 'right', flexShrink: 0 }}><div style={numLabelStyle}>Locate</div><div style={{ ...numValStyle, color: locate > 0 ? C.loss : C.muted }}>{locate > 0 ? `-$${locate.toFixed(2)}` : '$0.00'}</div></div>
+                  <div style={{ width: W_NUM, textAlign: 'right', flexShrink: 0 }}><div style={numLabelStyle}>Comm</div><div style={{ ...numValStyle, color: commission > 0 ? C.loss : C.muted }}>{commission > 0 ? `-$${commission.toFixed(2)}` : '$0.00'}</div></div>
+                </>)}
+                <div style={{ width: 22, flexShrink: 0, textAlign: 'center' }}>{t.chartImage && <span style={{ fontSize: 14 }} title="Ha uno screenshot">📷</span>}</div>
+                <div style={{ width: 22, flexShrink: 0, textAlign: 'center' }}>{hasWarning && <span style={{ fontSize: 14, cursor: 'help' }} title={`Esecuzione da migliorare: ${warningTags.join(', ')}`}>⚠️</span>}</div>
+                <span style={{ fontSize: isDesktop ? 18 : 14, fontWeight: 800, fontFamily: 'monospace', color: t.pnl >= 0 ? C.profit : C.loss, flexShrink: 0, width: W_PNL, textAlign: 'right' }}>{fmt$(t.pnl)}</span>
+                <span style={{ color: C.muted, fontSize: 13, flexShrink: 0, width: 16, textAlign: 'center' }}>{expandedId === t.id ? '▲' : '▼'}</span>
+              </div>
+
+              {expandedId === t.id && (
+                <div style={{ padding: isDesktop ? '22px 24px 24px' : '14px 16px 16px', background: C.card2 }}>
+                  {!isDesktop && (t.entryPrice != null || t.exitPrice != null || locate > 0 || commission > 0) && (
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 16, fontSize: 14, fontFamily: 'monospace', marginBottom: 16, padding: '12px 14px', background: C.card, borderRadius: 8, border: `1px solid ${C.border}` }}>
+                      {t.entryPrice != null && <span style={{ color: C.muted }}>Entry <b style={{ color: C.text }}>${t.entryPrice.toFixed(2)}</b></span>}
+                      {t.exitPrice != null && <span style={{ color: C.muted }}>Exit <b style={{ color: C.text }}>${t.exitPrice.toFixed(2)}</b></span>}
+                      <span style={{ color: C.muted }}>Locate <b style={{ color: locate > 0 ? C.loss : C.muted }}>-${locate.toFixed(2)}</b></span>
+                      <span style={{ color: C.muted }}>Comm <b style={{ color: commission > 0 ? C.loss : C.muted }}>-${commission.toFixed(2)}</b></span>
+                    </div>
+                  )}
+                  <div style={{ display: 'grid', gridTemplateColumns: isDesktop ? '1fr 1fr' : '1fr', gap: isDesktop ? 20 : 14, alignItems: 'start' }}>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+                      <ChartImageInput value={chartImageDraft} onChange={setChartImageDraft} small />
+                      <div>
+                        <div style={{ fontSize: 13, color: C.accent, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: 8 }}>📝 Note libere</div>
+                        <textarea value={noteDraft} onChange={e => setNoteDraft(e.target.value)} rows={isDesktop ? 9 : 4} placeholder="Scrivi qui le tue riflessioni sul trade…"
+                          style={{ background: C.card, border: `1px solid ${C.border}`, color: C.text, borderRadius: 8, padding: isDesktop ? '14px 16px' : '10px 12px', fontSize: isDesktop ? 14 : 13, width: '100%', resize: 'vertical', fontFamily: 'inherit', lineHeight: 1.55, minHeight: isDesktop ? 200 : 90 }} />
+                      </div>
+                    </div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+                      <div><div style={{ fontSize: 12, color: C.muted, marginBottom: 6 }}>Tag / Setup</div><TagInput tags={tagsDraft} onChange={setTagsDraft} suggestions={allTags} /></div>
+                      <JournalFields journal={journalDraft} onChange={setJournalDraft} />
+                    </div>
+                  </div>
+                  <div style={{ display: 'flex', gap: 8, marginTop: 16, flexWrap: 'wrap' }}>
+                    <button onClick={() => saveNote(t)} style={{ padding: '9px 18px', borderRadius: 6, border: 'none', background: C.accent, color: '#06121a', fontWeight: 800, fontSize: 13, cursor: 'pointer' }}>Salva</button>
+                    <button onClick={() => onDuplicate(t)} style={{ padding: '9px 18px', borderRadius: 6, border: `1px solid ${C.border}`, background: 'transparent', color: C.text, fontWeight: 700, fontSize: 13, cursor: 'pointer' }}>⧉ Duplica trade</button>
+                    <button onClick={() => onDelete(t.id)} style={{ padding: '9px 18px', borderRadius: 6, border: `1px solid ${C.loss}55`, background: 'transparent', color: C.loss, fontWeight: 700, fontSize: 13, cursor: 'pointer' }}>Elimina trade</button>
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════════════════
+// REVISIONE SETTIMANALE
+// ════════════════════════════════════════════════════════════
+const CHECKLIST_ITEMS = ['Rispettato il risk management', 'Seguito il piano di trading', 'Evitato revenge trading', 'Journaling completo dei trade'];
+
+function ImageLightbox({ src, onClose }) {
+  return (
+    <div onClick={onClose} style={{
+      position: 'fixed', inset: 0, zIndex: 500,
+      background: 'rgba(0,0,0,0.88)',
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+      padding: 24, cursor: 'zoom-out',
+    }}>
+      <img src={src} alt="chart" style={{ maxWidth: '95%', maxHeight: '95%', borderRadius: 8, boxShadow: '0 10px 40px rgba(0,0,0,0.7)' }} />
+    </div>
+  );
+}
+
+function WeekTradeRow({ t, isDesktop }) {
+  const [open, setOpen] = useState(false);
+  const [imgOpen, setImgOpen] = useState(false);
+
+  const hasNotes = !!(t.notes && t.notes.trim());
+  const entryTags = t.journal?.entryTags || [];
+  const eventTags = t.journal?.eventTags || [];
+  const hasChart = !!t.chartImage;
+  const hasDetail = hasNotes || entryTags.length > 0 || eventTags.length > 0 || hasChart;
+  const warningTags = getWarningTags(t);
+  const hasWarning = warningTags.length > 0;
+
+  return (
+    <div style={{
+      background: C.card, borderRadius: 8,
+      border: `1px solid ${open ? C.accent + '66' : C.border}`,
+      transition: 'border-color 0.15s',
+    }}>
+      <div
+        onClick={() => hasDetail && setOpen(o => !o)}
+        style={{
+          display: 'flex', alignItems: 'center', gap: 12, fontSize: 14,
+          padding: '12px 16px',
+          cursor: hasDetail ? 'pointer' : 'default',
+          borderRadius: open ? '8px 8px 0 0' : 8,
+        }}
+      >
+        <span style={{ color: C.muted, width: 90, flexShrink: 0, fontFamily: 'monospace' }}>{t.date}</span>
+        <span style={{ color: C.text, fontWeight: 800, width: 70, flexShrink: 0, fontSize: 15 }}>{t.ticker}</span>
+        <span style={{ color: C.muted, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {getTags(t).join(', ') || '—'}
+        </span>
+        {hasChart && <span style={{ fontSize: 14 }} title="Ha uno screenshot">📷</span>}
+        {hasWarning && (
+          <span style={{ fontSize: 14, cursor: 'help' }}
+            title={`⚠️ Esecuzione da migliorare:\n${warningTags.map(w => '· ' + w).join('\n')}`}>⚠️</span>
+        )}
+        <span style={{ fontWeight: 800, fontFamily: 'monospace', color: t.pnl >= 0 ? C.profit : C.loss, fontSize: 15, minWidth: 70, textAlign: 'right' }}>
+          {fmt$(t.pnl)}
+        </span>
+        {hasDetail ? (
+          <span style={{ color: C.muted, fontSize: 12, width: 16, textAlign: 'center' }}>{open ? '▲' : '▼'}</span>
+        ) : (
+          <span style={{ width: 16 }} />
+        )}
+      </div>
+
+      {open && (
+        <div style={{
+          padding: isDesktop ? '18px 20px 20px' : '14px 16px 16px',
+          borderTop: `1px solid ${C.border}`,
+          background: C.card2,
+          display: 'grid',
+          gridTemplateColumns: isDesktop ? '1fr 1fr' : '1fr',
+          gap: isDesktop ? 20 : 16,
+          alignItems: 'start',
+        }}>
+          <div>
+            <div style={{
+              fontSize: 12, color: C.accent, fontWeight: 700, textTransform: 'uppercase',
+              letterSpacing: '.05em', marginBottom: 8,
+            }}>
+              📝 Note libere
+            </div>
+            {hasNotes ? (
+              <div style={{
+                fontSize: 14, color: C.text, lineHeight: 1.6, whiteSpace: 'pre-wrap',
+                background: C.card, border: `1px solid ${C.border}`, borderRadius: 8,
+                padding: '14px 16px',
+              }}>{t.notes}</div>
+            ) : (
+              <div style={{
+                fontSize: 13, color: C.muted, fontStyle: 'italic',
+                background: C.card, border: `1px dashed ${C.border}`, borderRadius: 8,
+                padding: '14px 16px',
+              }}>Nessuna nota per questo trade</div>
+            )}
+          </div>
+
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+            {hasChart && (
+              <div>
+                <div style={{
+                  fontSize: 12, color: C.muted, fontWeight: 700, textTransform: 'uppercase',
+                  letterSpacing: '.05em', marginBottom: 8,
+                }}>
+                  Screenshot
+                </div>
+                <button
+                  onClick={() => setImgOpen(true)}
+                  style={{
+                    display: 'inline-flex', alignItems: 'center', gap: 8,
+                    padding: '10px 16px', borderRadius: 6, cursor: 'pointer',
+                    border: `1px solid ${C.accent}66`, background: `${C.accent}15`,
+                    color: C.accent, fontWeight: 700, fontSize: 13,
+                  }}
+                >
+                  📷 Apri screenshot
+                </button>
+              </div>
+            )}
+
+            {entryTags.length > 0 && (
+              <div>
+                <div style={{
+                  fontSize: 12, color: C.muted, fontWeight: 700, textTransform: 'uppercase',
+                  letterSpacing: '.05em', marginBottom: 8,
+                }}>
+                  Perché sono entrato
+                </div>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                  {entryTags.map(tag => (
+                    <span key={tag} style={{
+                      fontSize: 13, fontWeight: 700, padding: '6px 14px', borderRadius: 12,
+                      background: `${C.accent}18`, border: `1px solid ${C.accent}44`, color: C.accent,
+                    }}>{tag}</span>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {eventTags.length > 0 && (
+              <div>
+                <div style={{
+                  fontSize: 12, color: C.muted, fontWeight: 700, textTransform: 'uppercase',
+                  letterSpacing: '.05em', marginBottom: 8,
+                }}>
+                  Cosa è successo
+                </div>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                  {eventTags.map(tag => {
+                    const isPositive = POSITIVE_EVENT_TAGS.includes(tag);
+                    return (
+                      <span key={tag} style={{
+                        fontSize: 13, fontWeight: 700, padding: '6px 14px', borderRadius: 12,
+                        background: isPositive ? `${C.profit}18` : `${C.loss}18`,
+                        border: `1px solid ${isPositive ? C.profit : C.loss}44`,
+                        color: isPositive ? C.profit : C.loss,
+                      }}>{tag}</span>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {!hasChart && entryTags.length === 0 && eventTags.length === 0 && (
+              <div style={{ fontSize: 13, color: C.muted, fontStyle: 'italic' }}>
+                Nessun tag di journaling per questo trade
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {imgOpen && t.chartImage && (
+        <ImageLightbox src={t.chartImage} onClose={() => setImgOpen(false)} />
+      )}
+    </div>
+  );
+}
+
+function WeeklyReview({ trades, reviews, onSaveReview, isDesktop }) {
+  const [expandedWeek, setExpandedWeek] = useState(null);
+  const [draft, setDraft] = useState(null);
+
+  const weeks = useMemo(() => {
+    const map = {};
+    trades.forEach(t => {
+      const wk = getMonday(t.date);
+      if (!map[wk]) map[wk] = [];
+      map[wk].push(t);
+    });
+    return Object.entries(map)
+      .map(([wk, wtrades]) => {
+        const pnl = wtrades.reduce((s, t) => s + t.pnl, 0);
+        const wins = wtrades.filter(t => t.pnl > 0).length;
+        return { weekKey: wk, trades: wtrades, pnl, count: wtrades.length, winrate: wtrades.length ? wins / wtrades.length : 0 };
+      })
+      .sort((a, b) => b.weekKey.localeCompare(a.weekKey));
+  }, [trades]);
+
+  const tagJournalStats = (field) => {
+    const map = {};
+    trades.forEach(t => { (t.journal?.[field] || []).forEach(tag => { (map[tag] = map[tag] || []).push(t); }); });
+    return Object.entries(map).map(([tag, list]) => {
+      const n = list.length;
+      const winrate = n ? list.filter(t => t.pnl > 0).length / n : 0;
+      const totalPnl = list.reduce((s, t) => s + t.pnl, 0);
+      return { tag, n, winrate, avgPnl: n ? totalPnl / n : 0, totalPnl };
+    }).sort((a, b) => b.n - a.n);
+  };
+  const entryStats = useMemo(() => tagJournalStats('entryTags'), [trades]);
+  const eventStats = useMemo(() => tagJournalStats('eventTags'), [trades]);
+
+  const openWeek = w => {
+    if (expandedWeek === w.weekKey) { setExpandedWeek(null); return; }
+    setExpandedWeek(w.weekKey);
+    const existing = reviews[w.weekKey] || { rating: null, notes: '', checklist: {} };
+    setDraft({ ...existing });
+  };
+
+  const save = weekKey => { onSaveReview(weekKey, draft); };
+
+  const isReviewSaved = (r) => {
+    if (!r) return false;
+    if (r.rating != null) return true;
+    if (r.notes && r.notes.trim()) return true;
+    if (r.checklist && Object.values(r.checklist).some(v => v)) return true;
+    return false;
+  };
+
+  if (weeks.length === 0) return (
+    <div style={{ background: C.card, border: `1px dashed ${C.border}`, borderRadius: 12, padding: 30, textAlign: 'center', color: C.muted, fontSize: 14 }}>
+      Nessuna settimana da revisionare ancora — aggiungi qualche trade
+    </div>
+  );
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      {(entryStats.length > 0 || eventStats.length > 0) && (
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(380px, 1fr))', gap: 14 }}>
+          {entryStats.length > 0 && (
+            <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: 18 }}>
+              <div style={{ fontSize: 12, color: C.muted, textTransform: 'uppercase', letterSpacing: '.07em', marginBottom: 12, fontWeight: 700 }}>Perché entri più spesso</div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                {entryStats.map(e => (
+                  <div key={e.tag} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 14px', background: C.card2, borderRadius: 8, border: `1px solid ${C.border}` }}>
+                    <span style={{ fontSize: 15, color: C.text, fontWeight: 700 }}>{e.tag}</span>
+                    <div style={{ display: 'flex', gap: 14, alignItems: 'baseline' }}>
+                      <span style={{ fontSize: 12, color: C.muted }}>×{e.n} · WR {(e.winrate * 100).toFixed(0)}%</span>
+                      <span style={{ fontSize: 16, fontWeight: 800, fontFamily: 'monospace', color: e.totalPnl >= 0 ? C.profit : C.loss }}>{fmt$(e.totalPnl)}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          {eventStats.length > 0 && (
+            <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: 18 }}>
+              <div style={{ fontSize: 12, color: C.muted, textTransform: 'uppercase', letterSpacing: '.07em', marginBottom: 12, fontWeight: 700 }}>Cosa succede più spesso</div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                {eventStats.map(e => {
+                  const isPositive = POSITIVE_EVENT_TAGS.includes(e.tag);
+                  return (
+                    <div key={e.tag} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 14px', background: C.card2, borderRadius: 8, border: `1px solid ${C.border}` }}>
+                      <span style={{ fontSize: 15, color: isPositive ? C.profit : C.text, fontWeight: 700 }}>{e.tag}</span>
+                      <div style={{ display: 'flex', gap: 14, alignItems: 'baseline' }}>
+                        <span style={{ fontSize: 12, color: C.muted }}>×{e.n}</span>
+                        <span style={{ fontSize: 16, fontWeight: 800, fontFamily: 'monospace', color: e.totalPnl >= 0 ? C.profit : C.loss }}>{fmt$(e.totalPnl)}</span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {weeks.map(w => {
+        const rev = reviews[w.weekKey];
+        const isOpen = expandedWeek === w.weekKey;
+        const saved = isReviewSaved(rev);
+        return (
+          <div key={w.weekKey} style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, overflow: 'hidden' }}>
+            <div onClick={() => openWeek(w)} style={{ display: 'flex', alignItems: 'center', gap: 14, padding: '16px 22px', cursor: 'pointer' }}>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 16, fontWeight: 800, color: C.text }}>{formatWeekRange(w.weekKey)}</div>
+                <div style={{ fontSize: 13, color: C.muted, marginTop: 3 }}>{w.count} trade · {(w.winrate * 100).toFixed(0)}% winrate</div>
+              </div>
+              <span style={{ fontSize: 18, fontWeight: 800, fontFamily: 'monospace', color: w.pnl >= 0 ? C.profit : C.loss }}>{fmt$(w.pnl)}</span>
+              {saved && (<span style={{ fontSize: 11, fontWeight: 800, padding: '3px 9px', borderRadius: 6, background: `${C.profit}15`, color: C.profit, border: `1px solid ${C.profit}44` }} title="Revisione salvata">✓ Revisionata</span>)}
+              {rev?.rating != null && (<span style={{ fontSize: 13, fontWeight: 800, padding: '4px 11px', borderRadius: 6, background: `${C.yellow}18`, color: C.yellow, border: `1px solid ${C.yellow}44` }}>⭐ {rev.rating}/10</span>)}
+              <span style={{ color: C.muted, fontSize: 13 }}>{isOpen ? '▲' : '▼'}</span>
+            </div>
+
+            {isOpen && draft && (
+              <div style={{ padding: '8px 22px 22px', background: C.card2, display: 'flex', flexDirection: 'column', gap: 16 }}>
+                <div>
+                  <div style={{ fontSize: 12, color: C.muted, marginBottom: 10, textTransform: 'uppercase', letterSpacing: '.06em', fontWeight: 700 }}>
+                    Trade della settimana ({w.trades.length}) — clicca per aprire i dettagli
+                  </div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                    {[...w.trades].sort((a, b) => a.date.localeCompare(b.date)).map(t => (
+                      <WeekTradeRow key={t.id} t={t} isDesktop={isDesktop} />
+                    ))}
+                  </div>
+                </div>
+
+                <div>
+                  <div style={{ fontSize: 12, color: C.muted, marginBottom: 10, textTransform: 'uppercase', letterSpacing: '.06em', fontWeight: 700 }}>Voto settimana</div>
+                  <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                    {Array.from({ length: 10 }, (_, i) => i + 1).map(n => (
+                      <button key={n} onClick={() => setDraft({ ...draft, rating: n })} style={{ width: 40, height: 40, borderRadius: 8, cursor: 'pointer', fontSize: 15, fontWeight: 800, border: `1px solid ${draft.rating === n ? C.yellow : C.border}`, background: draft.rating === n ? `${C.yellow}22` : C.card, color: draft.rating === n ? C.yellow : C.muted }}>{n}</button>
+                    ))}
+                  </div>
+                </div>
+
+                <div>
+                  <div style={{ fontSize: 12, color: C.muted, marginBottom: 10, textTransform: 'uppercase', letterSpacing: '.06em', fontWeight: 700 }}>Checklist disciplina</div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                    {CHECKLIST_ITEMS.map(item => (
+                      <label key={item} style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 14, color: C.text, cursor: 'pointer', padding: '10px 14px', background: C.card, borderRadius: 8, border: `1px solid ${C.border}` }}>
+                        <input type="checkbox" checked={!!draft.checklist?.[item]} style={{ width: 18, height: 18 }} onChange={e => setDraft({ ...draft, checklist: { ...draft.checklist, [item]: e.target.checked } })} />
+                        {item}
+                      </label>
+                    ))}
+                  </div>
+                </div>
+
+                <div>
+                  <div style={{ fontSize: 12, color: C.muted, marginBottom: 10, textTransform: 'uppercase', letterSpacing: '.06em', fontWeight: 700 }}>Note / riflessioni</div>
+                  <textarea value={draft.notes} onChange={e => setDraft({ ...draft, notes: e.target.value })} rows={6} placeholder="Cosa ha funzionato? Cosa migliorare la prossima settimana?" style={{ background: C.card, border: `1px solid ${C.border}`, color: C.text, borderRadius: 8, padding: '12px 14px', fontSize: 14, width: '100%', resize: 'vertical', fontFamily: 'inherit', lineHeight: 1.55 }} />
+                </div>
+
+                <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                  <button onClick={() => save(w.weekKey)} style={{ padding: '10px 22px', borderRadius: 6, border: 'none', background: C.accent, color: '#06121a', fontWeight: 800, fontSize: 14, cursor: 'pointer' }}>Salva revisione</button>
+                  {saved && (<span style={{ fontSize: 12, color: C.profit, fontWeight: 700 }}>✓ Revisione salvata — riapri questa settimana per rivederla</span>)}
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function PendingNotesList({ notes, onDelete }) {
+  const unused = notes.filter(n => !n.used).sort((a, b) => b.date.localeCompare(a.date));
+  if (notes.length === 0) return null;
+  return (
+    <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, overflow: 'hidden' }}>
+      <div style={{ padding: '12px 18px', background: C.card2, fontSize: 11, color: C.muted, textTransform: 'uppercase', letterSpacing: '.07em', fontWeight: 700 }}>Note pre-import in attesa di abbinamento ({unused.length})</div>
+      {unused.length === 0 && <div style={{ padding: 16, textAlign: 'center', fontSize: 13, color: C.muted }}>Tutte le note sono già state abbinate</div>}
+      {unused.map(n => (
+        <div key={n.id} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '10px 18px', borderTop: `1px solid ${C.border}` }}>
+          <span style={{ fontSize: 13, color: C.muted, width: 90, flexShrink: 0, fontFamily: 'monospace' }}>{n.date}</span>
+          <span style={{ fontSize: 14, fontWeight: 700, color: C.text, width: 70, flexShrink: 0 }}>{n.ticker}</span>
+          {n.chartImage && (<img src={n.chartImage} alt="chart" style={{ height: 36, borderRadius: 4, border: `1px solid ${C.border}`, flexShrink: 0 }} />)}
+          <span style={{ fontSize: 13, color: C.text, flex: 1 }}>{(n.journal?.entryTags || []).join(', ') || n.notes || '—'}</span>
+          <span onClick={() => onDelete(n.id)} style={{ color: C.muted, cursor: 'pointer', fontSize: 14 }}>✕</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════════════════
+// IMPORT
+// ════════════════════════════════════════════════════════════
+function ImportPanel({ existingTrades, onImport, pendingNotes, onDeleteNote }) {
+  const [tradeRows, setTradeRows] = useState(null);
+  const [cashRows, setCashRows] = useState(null);
+  const [locateMap, setLocateMap] = useState({});
+  const [preview, setPreview] = useState([]);
+  const [selected, setSelected] = useState({});
+  const [error, setError] = useState('');
+
+  const handleFile = (file, kind) => {
+    const reader = new FileReader();
+    reader.onload = e => {
+      try {
+        const rows = parseCSV(e.target.result);
+        if (kind === 'trades') setTradeRows(rows);
+        else { setCashRows(rows); setLocateMap(buildLocateCostMap(rows)); }
+        setError('');
+      } catch (err) { setError('Errore nel leggere il file: ' + err.message); }
+    };
+    reader.onerror = () => setError('Impossibile leggere il file selezionato.');
+    reader.readAsText(file);
+  };
+
+  useEffect(() => {
+    if (!tradeRows) { setPreview([]); return; }
+    const trips = buildRoundTripsFromTradeHistory(tradeRows);
+    const notesByKey = {};
+    pendingNotes.filter(n => !n.used).forEach(n => { const key = `${n.date}__${n.ticker}`; (notesByKey[key] = notesByKey[key] || []).push(n); });
+    const tripIdxsByKey = {};
+    trips.forEach((t, i) => { const key = `${t.date}__${t.ticker}`; (tripIdxsByKey[key] = tripIdxsByKey[key] || []).push(i); });
+    const matchByIdx = {};
+    Object.entries(tripIdxsByKey).forEach(([key, idxs]) => {
+      const notes = notesByKey[key] || [];
+      const sortedIdxs = [...idxs].sort((ia, ib) => {
+        const ta = trips[ia].time || '99:99';
+        const tb = trips[ib].time || '99:99';
+        return ta.localeCompare(tb);
+      });
+      sortedIdxs.forEach((idx, i) => { if (notes[i]) matchByIdx[idx] = notes[i]; });
+    });
+    const withLocate = trips.map((t, i) => {
+      const locateCost = locateMap[`${t.date}__${t.ticker}`] || 0;
+      const finalPnl = t.pnlFromProceeds - locateCost;
+      const isDup = existingTrades.some(e => e.date === t.date && e.ticker === t.ticker && Math.abs((e.entryPrice ?? -999) - (t.entryPrice ?? -998)) < 0.005);
+      const matchedNote = matchByIdx[i] || null;
+      return { ...t, locateCost, finalPnl, isDup, matchedNoteId: matchedNote?.id ?? null, matchedNote };
+    });
+    setPreview(withLocate);
+    const initSel = {};
+    withLocate.forEach((t, i) => { initSel[i] = !t.isDup; });
+    setSelected(initSel);
+  }, [tradeRows, locateMap, existingTrades, pendingNotes]);
+
+  const toggleSel = i => setSelected(s => ({ ...s, [i]: !s[i] }));
+  const selectedCount = Object.values(selected).filter(Boolean).length;
+
+  const doImport = () => {
+    const toImport = preview.filter((_, i) => selected[i]).map(t => {
+      const parts = [];
+      if (t.matchedNote?.notes) parts.push(t.matchedNote.notes);
+      if (t.openPosition) parts.push('Posizione aperta a fine file');
+      return {
+        id: uuid(), date: t.date, ticker: t.ticker, tags: ['Import TradeZero'], side: t.side,
+        entryPrice: t.entryPrice, exitPrice: t.exitPrice, time: t.time || null, pnl: t.finalPnl,
+        locateCost: t.locateCost || 0, commission: 0,
+        notes: parts.join(' · '),
+        journal: t.matchedNote?.journal || {},
+        chartImage: t.matchedNote?.chartImage || null,
+      };
+    });
+    const usedNoteIds = [...new Set(preview.filter((_, i) => selected[i]).map(t => t.matchedNoteId).filter(Boolean))];
+    onImport(toImport, usedNoteIds);
+    setTradeRows(null); setPreview([]); setSelected({});
+  };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      <PendingNotesList notes={pendingNotes} onDelete={onDeleteNote} />
+      <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: 18 }}>
+        <div style={{ fontSize: 12, color: C.muted, textTransform: 'uppercase', letterSpacing: '.07em', marginBottom: 12, fontWeight: 700 }}>Carica file TradeZero</div>
+        <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+          <label style={fileLabelStyle}>
+            📄 TradeHistory.csv {tradeRows && `✓ (${tradeRows.length} righe)`}
+            <input type="file" accept=".csv" style={{ display: 'none' }} onChange={e => e.target.files[0] && handleFile(e.target.files[0], 'trades')} />
+          </label>
+          <label style={fileLabelStyle}>
+            📄 CashJournal.csv (opzionale) {cashRows && `✓ (${cashRows.length} righe, ${Object.keys(locateMap).length} locate)`}
+            <input type="file" accept=".csv" style={{ display: 'none' }} onChange={e => e.target.files[0] && handleFile(e.target.files[0], 'cash')} />
+          </label>
+        </div>
+        {cashRows && Object.keys(locateMap).length === 0 && (<div style={{ color: C.yellow, fontSize: 13, marginTop: 8 }}>⚠ File letto ({cashRows.length} righe) ma nessuna riga "Locate Fees" riconosciuta.</div>)}
+        {error && <div style={{ color: C.loss, fontSize: 13, marginTop: 8 }}>{error}</div>}
+      </div>
+
+      {preview.length > 0 && (
+        <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, overflow: 'hidden' }}>
+          <div style={{ padding: '12px 18px', background: C.card2, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span style={{ fontSize: 11, color: C.muted, textTransform: 'uppercase', letterSpacing: '.07em', fontWeight: 700 }}>Anteprima ({preview.length} round-trip)</span>
+            <button onClick={doImport} disabled={selectedCount === 0} style={{ padding: '7px 16px', borderRadius: 6, border: 'none', fontWeight: 800, fontSize: 13, background: selectedCount ? C.profit : C.border, color: selectedCount ? '#06120a' : C.muted, cursor: selectedCount ? 'pointer' : 'default' }}>Importa {selectedCount} trade</button>
+          </div>
+          <div style={{ maxHeight: 380, overflowY: 'auto' }}>
+            <table style={{ width: '100%', fontSize: 13, fontFamily: 'monospace', borderCollapse: 'collapse' }}>
+              <thead style={{ position: 'sticky', top: 0, background: '#0d2d40' }}>
+                <tr>{['','Data','Ticker','Side','Entry','Exit','Qty','Locate','PnL netto','Nota',''].map(h => (<th key={h} style={{ padding: '8px 10px', textAlign: 'left', fontSize: 11, color: C.muted, textTransform: 'uppercase' }}>{h}</th>))}</tr>
+              </thead>
+              <tbody>
+                {preview.map((t, i) => (
+                  <tr key={i} style={{ borderTop: `1px solid ${C.border}`, background: t.isDup ? 'rgba(232,196,104,0.06)' : 'transparent' }}>
+                    <td style={{ padding: '7px 10px' }}><input type="checkbox" checked={!!selected[i]} onChange={() => toggleSel(i)} /></td>
+                    <td style={{ padding: '7px 10px', color: C.muted }}>{t.date}</td>
+                    <td style={{ padding: '7px 10px', color: C.text, fontWeight: 700 }}>{t.ticker}</td>
+                    <td style={{ padding: '7px 10px', color: t.side === 'short' ? C.loss : C.profit }}>{t.side}</td>
+                    <td style={{ padding: '7px 10px' }}>{t.entryPrice?.toFixed(3) ?? '-'}</td>
+                    <td style={{ padding: '7px 10px' }}>{t.exitPrice?.toFixed(3) ?? '-'}</td>
+                    <td style={{ padding: '7px 10px', color: C.muted }}>{t.qty}</td>
+                    <td style={{ padding: '7px 10px', color: t.locateCost ? C.loss : C.muted }}>{t.locateCost ? `-${t.locateCost.toFixed(2)}` : '—'}</td>
+                    <td style={{ padding: '7px 10px', fontWeight: 700, color: t.finalPnl >= 0 ? C.profit : C.loss }}>{fmt$(t.finalPnl)}</td>
+                    <td style={{ padding: '7px 10px', fontSize: 12, maxWidth: 170 }}>
+                      <select value={t.matchedNoteId || ''}
+                        onChange={e => { const noteId = e.target.value || null; const note = pendingNotes.find(n => n.id === noteId) || null; setPreview(p => p.map((x, j) => j === i ? { ...x, matchedNoteId: noteId, matchedNote: note } : x)); }}
+                        style={{ background: C.card2, color: t.matchedNote ? C.accent : C.muted, border: `1px solid ${C.border}`, borderRadius: 4, padding: '4px 6px', fontSize: 12, maxWidth: 160 }}>
+                        <option value="">— nessuna —</option>
+                        {pendingNotes.filter(n => !n.used && n.date === t.date && n.ticker === t.ticker).map(n => (<option key={n.id} value={n.id}>{(n.journal?.entryTags || []).join(', ') || n.notes || 'nota'}</option>))}
+                      </select>
+                    </td>
+                    <td style={{ padding: '7px 10px', fontSize: 11 }}>
+                      {t.isDup && <span style={{ color: C.yellow }}>⚠ dup</span>}
+                      {t.openPosition && <span style={{ color: C.accent }}>⏳ aperta</span>}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+const fileLabelStyle = { padding: '11px 18px', borderRadius: 8, border: `1px dashed ${C.border}`, background: C.card2, color: C.text, fontSize: 13, fontWeight: 700, cursor: 'pointer' };
+
+// ════════════════════════════════════════════════════════════
+// FILTRI — MultiSelectDropdown
+// ════════════════════════════════════════════════════════════
+function MultiSelectDropdown({ label, options, selected, onChange, placeholder = 'Tutti', width = 180 }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+
+  useEffect(() => {
+    const onDocClick = e => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    document.addEventListener('mousedown', onDocClick);
+    return () => document.removeEventListener('mousedown', onDocClick);
+  }, []);
+
+  const inputStyle = { background: C.card2, border: `1px solid ${C.border}`, color: C.text, borderRadius: 6, padding: '7px 11px', fontSize: 14, height: 36, fontFamily: 'inherit' };
+  const labelStyle = { fontSize: 11, color: C.muted, marginBottom: 5, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.05em' };
+
+  const toggle = opt => {
+    onChange(selected.includes(opt) ? selected.filter(x => x !== opt) : [...selected, opt]);
+  };
+
+  const displayText = selected.length === 0
+    ? placeholder
+    : selected.length === 1
+      ? selected[0]
+      : `${selected.length} selezionati`;
+
+  const hasSelection = selected.length > 0;
+
+  return (
+    <div ref={ref} style={{ position: 'relative' }}>
+      {label && <div style={labelStyle}>{label}</div>}
+      <button type="button" onClick={() => setOpen(o => !o)} style={{
+        ...inputStyle, width, textAlign: 'left', display: 'flex', justifyContent: 'space-between',
+        alignItems: 'center', cursor: 'pointer', color: hasSelection ? C.text : C.muted,
+        borderColor: hasSelection ? `${C.accent}66` : C.border,
+        background: hasSelection ? `${C.accent}10` : C.card2,
+      }}>
+        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{displayText}</span>
+        <span style={{ fontSize: 10, marginLeft: 6, color: C.muted }}>{open ? '▲' : '▼'}</span>
+      </button>
+      {open && (
+        <div style={{
+          position: 'absolute', top: '100%', left: 0, marginTop: 4, minWidth: width,
+          background: C.card2, border: `1px solid ${C.border}`, borderRadius: 8,
+          boxShadow: '0 10px 26px rgba(0,0,0,0.45)', maxHeight: 260, overflowY: 'auto', zIndex: 100,
+        }}>
+          {options.length === 0 && (<div style={{ padding: 12, fontSize: 13, color: C.muted }}>Nessuna opzione</div>)}
+          {options.map(opt => {
+            const active = selected.includes(opt);
+            return (
+              <div key={opt} onClick={() => toggle(opt)} style={{
+                display: 'flex', alignItems: 'center', gap: 10, padding: '9px 12px', cursor: 'pointer',
+                background: active ? `${C.accent}12` : 'transparent',
+              }}>
+                <input type="checkbox" checked={active} readOnly style={{ pointerEvents: 'none', width: 15, height: 15 }} />
+                <span style={{ fontSize: 14, color: active ? C.text : C.muted }}>{opt}</span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════════════════
+// FILTRI
+// ════════════════════════════════════════════════════════════
+function FilterBar({ trades, filters, setFilters }) {
+  const allTags = useMemo(() => {
+    const s = new Set();
+    trades.forEach(t => getTags(t).forEach(tag => s.add(tag)));
+    return Array.from(s).sort();
+  }, [trades]);
+
+  const reset = () => setFilters({
+    dateFrom: '', dateTo: '', tags: [], ticker: '',
+    side: '', weekdays: [], priceBuckets: [], timeBuckets: [],
+  });
+
+  const active = !!(
+    filters.dateFrom || filters.dateTo ||
+    (filters.tags && filters.tags.length) || filters.ticker ||
+    filters.side ||
+    (filters.weekdays && filters.weekdays.length) ||
+    (filters.priceBuckets && filters.priceBuckets.length) ||
+    (filters.timeBuckets && filters.timeBuckets.length)
+  );
+
+  const inputStyle = { background: C.card2, border: `1px solid ${C.border}`, color: C.text, borderRadius: 6, padding: '7px 11px', fontSize: 14, height: 36, fontFamily: 'inherit' };
+  const labelStyle = { fontSize: 11, color: C.muted, marginBottom: 5, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.05em' };
+
+  return (
+    <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'flex-end', background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: '14px 18px' }}>
+      <div><div style={labelStyle}>Da</div><input type="date" value={filters.dateFrom} onChange={e => setFilters({ ...filters, dateFrom: e.target.value })} style={inputStyle} /></div>
+      <div><div style={labelStyle}>A</div><input type="date" value={filters.dateTo} onChange={e => setFilters({ ...filters, dateTo: e.target.value })} style={inputStyle} /></div>
+      <div><div style={labelStyle}>Ticker</div><input type="text" placeholder="es. VCIG" value={filters.ticker} onChange={e => setFilters({ ...filters, ticker: e.target.value.toUpperCase() })} style={{ ...inputStyle, width: 120 }} /></div>
+
+      <div>
+        <div style={labelStyle}>Side</div>
+        <select value={filters.side || ''} onChange={e => setFilters({ ...filters, side: e.target.value })} style={{ ...inputStyle, width: 120, cursor: 'pointer' }}>
+          <option value="">Tutti</option>
+          <option value="Long">Long</option>
+          <option value="Short">Short</option>
+        </select>
+      </div>
+
+      <MultiSelectDropdown label="Tag" options={allTags} selected={filters.tags || []} onChange={v => setFilters({ ...filters, tags: v })} width={180} placeholder="Tutti i tag" />
+      <MultiSelectDropdown label="Giorno" options={WEEKDAY_NAMES} selected={filters.weekdays || []} onChange={v => setFilters({ ...filters, weekdays: v })} width={150} placeholder="Tutti" />
+      <MultiSelectDropdown label="Prezzo" options={PRICE_ORDER} selected={filters.priceBuckets || []} onChange={v => setFilters({ ...filters, priceBuckets: v })} width={150} placeholder="Tutte" />
+      <MultiSelectDropdown label="Orario" options={TIME_ORDER} selected={filters.timeBuckets || []} onChange={v => setFilters({ ...filters, timeBuckets: v })} width={170} placeholder="Tutte" />
+
+      {active && (<button onClick={reset} style={{ padding: '7px 16px', borderRadius: 6, border: `1px solid ${C.border}`, background: 'transparent', color: C.muted, fontSize: 13, cursor: 'pointer', height: 36 }}>✕ Reset filtri</button>)}
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════════════════
+// STATS AVANZATE
+// ════════════════════════════════════════════════════════════
+function groupStats(trades, keyFn, keyOrder = null) {
+  const map = {};
+  trades.forEach(t => {
+    const k = keyFn(t);
+    if (k === null || k === undefined) return;
+    (map[k] = map[k] || []).push(t);
+  });
+  const buildRow = (key, list) => {
+    const n = list.length;
+    const wins = list.filter(t => t.pnl > 0).length;
+    const totalPnl = list.reduce((s, t) => s + t.pnl, 0);
+    return { key, n, winrate: n ? wins / n : 0, avgPnl: n ? totalPnl / n : 0, totalPnl };
+  };
+  if (keyOrder) return keyOrder.map(k => buildRow(k, map[k] || []));
+  return Object.entries(map).map(([key, list]) => buildRow(key, list)).sort((a, b) => b.totalPnl - a.totalPnl);
+}
+
+function BreakdownSection({ title, rows, note }) {
+  const allEmpty = rows.length > 0 && rows.every(r => r.n === 0);
+  if (!rows.length || allEmpty) return (
+    <div style={{ background: C.card, border: `1px dashed ${C.border}`, borderRadius: 12, padding: 20 }}>
+      <div style={{ fontSize: 13, color: C.muted, textTransform: 'uppercase', letterSpacing: '.07em', marginBottom: 8, fontWeight: 700 }}>{title}</div>
+      <div style={{ fontSize: 14, color: C.muted }}>{note || 'Nessun dato disponibile'}</div>
+    </div>
+  );
+  const maxAbs = Math.max(...rows.map(r => Math.abs(r.totalPnl)), 1);
+  return (
+    <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: 20 }}>
+      <div style={{ fontSize: 13, color: C.muted, textTransform: 'uppercase', letterSpacing: '.07em', marginBottom: 16, fontWeight: 700 }}>{title}</div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+        {rows.map(r => (
+          <div key={r.key}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+              <span style={{ fontSize: 15, fontWeight: 700, color: r.n === 0 ? C.muted : C.text }}>{r.key}</span>
+              <div style={{ display: 'flex', gap: 14, alignItems: 'baseline' }}>
+                <span style={{ fontSize: 12, color: C.muted }}>{r.n} tr · WR {(r.winrate * 100).toFixed(0)}%</span>
+                <span style={{ fontSize: 15, fontWeight: 800, fontFamily: 'monospace', color: r.n === 0 ? C.muted : (r.totalPnl >= 0 ? C.profit : C.loss) }}>{fmt$(r.totalPnl)}</span>
+              </div>
+            </div>
+            <div style={{ height: 6, borderRadius: 3, background: C.border, overflow: 'hidden' }}>
+              <div style={{ height: '100%', width: `${(Math.abs(r.totalPnl) / maxAbs) * 100}%`, background: r.totalPnl >= 0 ? C.profit : C.loss, borderRadius: 3 }} />
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+const WEEKDAY_NAMES = ['Lun', 'Mar', 'Mer', 'Gio', 'Ven', 'Sab', 'Dom'];
+const PRICE_ORDER = ['< $1', '$1 - $3', '$3 - $5', '$5 - $10', '$10 - $20', '$20+'];
+function priceBucket(price) {
+  if (price == null) return null;
+  if (price < 1) return '< $1';
+  if (price < 3) return '$1 - $3';
+  if (price < 5) return '$3 - $5';
+  if (price < 10) return '$5 - $10';
+  if (price < 20) return '$10 - $20';
+  return '$20+';
+}
+const TIME_ORDER = ['Pre-market', '09:30 - 10:00', '10:00 - 10:30', '10:30 - 11:00', '11:00 - 12:00', '12:00 - 14:00', '14:00 - 16:00', 'After-hours'];
+function timeBucket(time) {
+  if (!time) return null;
+  const [h, m] = time.split(':').map(Number);
+  const mins = h * 60 + m;
+  if (mins < 9 * 60 + 30) return 'Pre-market';
+  if (mins < 10 * 60) return '09:30 - 10:00';
+  if (mins < 10 * 60 + 30) return '10:00 - 10:30';
+  if (mins < 11 * 60) return '10:30 - 11:00';
+  if (mins < 12 * 60) return '11:00 - 12:00';
+  if (mins < 14 * 60) return '12:00 - 14:00';
+  if (mins <= 16 * 60) return '14:00 - 16:00';
+  return 'After-hours';
+}
+
+function TagsSection({ tagRows }) {
+  if (!tagRows.length) return (
+    <div style={{ background: C.card, border: `1px dashed ${C.border}`, borderRadius: 12, padding: 20 }}>
+      <div style={{ fontSize: 13, color: C.muted, textTransform: 'uppercase', letterSpacing: '.07em', marginBottom: 8, fontWeight: 700 }}>Per strategia / tag</div>
+      <div style={{ fontSize: 14, color: C.muted }}>Nessun tag registrato</div>
+    </div>
+  );
+  const maxAbs = Math.max(...tagRows.map(r => Math.abs(r.totalPnl)), 1);
+  return (
+    <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: 20 }}>
+      <div style={{ fontSize: 13, color: C.muted, textTransform: 'uppercase', letterSpacing: '.07em', marginBottom: 16, fontWeight: 700 }}>Per strategia / tag</div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+        {tagRows.map(r => (
+          <div key={r.tag}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6, gap: 10 }}>
+              <span style={{ fontSize: 15, fontWeight: 700, color: C.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>🏷 {r.tag}</span>
+              <div style={{ display: 'flex', gap: 12, alignItems: 'baseline', flexShrink: 0 }}>
+                <span style={{ fontSize: 12, color: C.muted }}>{r.n} tr · WR {(r.winrate * 100).toFixed(0)}% · PF {r.pf.toFixed(2)}</span>
+                <span style={{ fontSize: 15, fontWeight: 800, fontFamily: 'monospace', color: r.totalPnl >= 0 ? C.profit : C.loss }}>{fmt$(r.totalPnl)}</span>
+              </div>
+            </div>
+            <div style={{ height: 6, borderRadius: 3, background: C.border, overflow: 'hidden' }}>
+              <div style={{ height: '100%', width: `${(Math.abs(r.totalPnl) / maxAbs) * 100}%`, background: r.totalPnl >= 0 ? C.profit : C.loss, borderRadius: 3 }} />
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function StrategyView({ trades }) {
+  const tagRows = useMemo(() => groupByTags(trades), [trades]);
+  const bySide = useMemo(() => groupStats(trades, t => t.side === 'short' ? 'Short' : t.side === 'long' ? 'Long' : null), [trades]);
+  const byWeekday = useMemo(() => groupStats(trades, t => WEEKDAY_NAMES[(new Date(t.date + 'T00:00:00').getDay() + 6) % 7], WEEKDAY_NAMES), [trades]);
+  const byPrice = useMemo(() => groupStats(trades.filter(t => t.entryPrice != null), t => priceBucket(t.entryPrice), PRICE_ORDER), [trades]);
+  const withTime = useMemo(() => trades.filter(t => t.time), [trades]);
+  const byTime = useMemo(() => groupStats(withTime, t => timeBucket(t.time), TIME_ORDER), [trades]);
+
+  if (trades.length === 0) return (
+    <div style={{ background: C.card, border: `1px dashed ${C.border}`, borderRadius: 12, padding: 30, textAlign: 'center', color: C.muted, fontSize: 14 }}>Nessun trade da analizzare</div>
+  );
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      <div style={{ fontSize: 13, color: C.muted }}>
+        📊 Analisi su <b style={{ color: C.text }}>{trades.length}</b> trade · {withTime.length} con orario registrato
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(420px, 1fr))', gap: 14, alignItems: 'start' }}>
+        {/* Colonna 1: Tags + Long vs Short uno sotto l'altro */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <TagsSection tagRows={tagRows} />
+          <BreakdownSection title="Long vs Short" rows={bySide} note="Nessun side registrato sui trade" />
+        </div>
+        <BreakdownSection title="Giorno della settimana" rows={byWeekday} />
+        <BreakdownSection title="Fascia di prezzo entry" rows={byPrice} note="Nessun entry price registrato" />
+        <BreakdownSection title="Fascia oraria" rows={byTime} note="Nessun orario registrato — aggiungilo nel form trade o dall'import TradeZero" />
+      </div>
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════════════════
+// REPORT
+// ════════════════════════════════════════════════════════════
+function buildReport(periodLabel, trades, reviews, reviewKeys) {
+  if (trades.length === 0) return null;
+  const n = trades.length;
+  const wins = trades.filter(t => t.pnl > 0);
+  const losses = trades.filter(t => t.pnl <= 0);
+  const totalPnl = trades.reduce((s, t) => s + t.pnl, 0);
+  const winrate = wins.length / n;
+  const avgWin = wins.length ? wins.reduce((s, t) => s + t.pnl, 0) / wins.length : 0;
+  const avgLoss = losses.length ? Math.abs(losses.reduce((s, t) => s + t.pnl, 0) / losses.length) : 0;
+  const pf = avgLoss > 0 && losses.length ? (avgWin * wins.length) / (avgLoss * losses.length) : 0;
+  const sorted = [...trades].sort((a, b) => a.pnl - b.pnl);
+  const worst = sorted[0], best = sorted[sorted.length - 1];
+
+  const strategyLines = groupByTags(trades).map(r => `  - ${r.tag}: ${r.n} trade, winrate ${(r.winrate * 100).toFixed(0)}%, PnL ${fmt$(r.totalPnl)}`);
+  const groupByJournalTags = (trades, field) => {
+    const map = {};
+    trades.forEach(t => { (t.journal?.[field] || []).forEach(tag => (map[tag] = map[tag] || []).push(t)); });
+    return Object.entries(map).sort((a, b) => b[1].length - a[1].length).map(([tag, list]) => {
+      const wr = list.filter(t => t.pnl > 0).length / list.length;
+      const p = list.reduce((s, t) => s + t.pnl, 0);
+      return `  - ${tag}: ×${list.length}, winrate ${(wr * 100).toFixed(0)}%, PnL ${fmt$(p)}`;
+    });
+  };
+  const entryTagLines = groupByJournalTags(trades, 'entryTags');
+  const eventTagLines = groupByJournalTags(trades, 'eventTags');
+  const reviewLines = reviewKeys.filter(k => reviews[k]).map(k => {
+    const r = reviews[k];
+    return `  - Settimana ${formatWeekRange(k)}: voto ${r.rating ?? '—'}/10${r.notes ? ` — "${r.notes}"` : ''}`;
+  });
+  const tradeListLines = [...trades].sort((a, b) => a.date.localeCompare(b.date)).map(t => `  ${t.date} · ${t.ticker.padEnd(6)} · ${(getTags(t).join(', ') || '-').padEnd(18)} · ${t.side ?? '-'} · ${fmt$(t.pnl)}`);
+
+  const summary = `
+═══════════════════════════════════════════
+TRADING JOURNAL — REPORT ${periodLabel.toUpperCase()}
+═══════════════════════════════════════════
+
+KPI GENERALI
+  Trade totali: ${n}
+  Winrate: ${(winrate * 100).toFixed(1)}%
+  P&L totale: ${fmt$(totalPnl)}
+  Expectancy: ${fmt$(totalPnl / n)}/trade
+  Profit Factor: ${pf.toFixed(2)}
+  Miglior trade: ${best.ticker} ${fmt$(best.pnl)}
+  Peggior trade: ${worst.ticker} ${fmt$(worst.pnl)}
+
+PER STRATEGIA
+${strategyLines.join('\n') || '  (nessun dato)'}
+
+PERCHÉ SEI ENTRATO (dal journaling)
+${entryTagLines.join('\n') || '  (nessun tag di entrata registrato)'}
+
+COSA È SUCCESSO (dal journaling)
+${eventTagLines.join('\n') || '  (nessun tag evento registrato)'}
+${reviewLines.length ? `\nREVISIONI SETTIMANALI\n${reviewLines.join('\n')}` : ''}
+
+DETTAGLIO TRADE
+${tradeListLines.join('\n')}
+`.trim();
+
+  const prompt = `
+Sono un trader retail che opera short-selling su small cap USA gap-up. Analizza i miei dati di trading di ${periodLabel} qui sotto e aiutami a capire:
+
+1. Guardando PERCHÉ SEI ENTRATO, quali setup/motivazioni di ingresso funzionano meglio e quali andrebbero evitati (winrate e PnL per tag)?
+2. Ci sono pattern ricorrenti nei trade in perdita legati a un tag di entrata specifico?
+3. Guardando COSA È SUCCESSO, quale singolo problema di esecuzione mi costa di più (frequenza × PnL negativo)?
+4. Quale strategia/tag sta performando meglio/peggio?
+5. Dammi 2-3 azioni concrete da applicare nel prossimo periodo.
+
+Ecco i dati:
+
+${summary}
+`.trim();
+  return { summary, prompt };
+}
+
+function ReportPanel({ trades, reviews }) {
+  const [mode, setMode] = useState('week');
+  const [selectedKey, setSelectedKey] = useState('');
+  const [view, setView] = useState('summary');
+  const [copied, setCopied] = useState(false);
+
+  const weekKeys = useMemo(() => { const s = new Set(trades.map(t => getMonday(t.date))); return Array.from(s).sort().reverse(); }, [trades]);
+  const monthKeys = useMemo(() => { const s = new Set(trades.map(t => t.date.slice(0, 7))); return Array.from(s).sort().reverse(); }, [trades]);
+  const keys = mode === 'week' ? weekKeys : monthKeys;
+
+  useEffect(() => { if (keys.length && !keys.includes(selectedKey)) setSelectedKey(keys[0]); }, [mode, keys.join(',')]);
+
+  const periodTrades = useMemo(() => {
+    if (!selectedKey) return [];
+    if (mode === 'week') { const monday = selectedKey; const sunday = addDays(monday, 6); return trades.filter(t => t.date >= monday && t.date <= sunday); }
+    return trades.filter(t => t.date.startsWith(selectedKey));
+  }, [trades, mode, selectedKey]);
+
+  const reviewKeys = mode === 'week' ? [selectedKey] : weekKeys.filter(wk => wk.startsWith(selectedKey.slice(0, 7)) || wk.slice(0, 7) === selectedKey);
+  const periodLabel = mode === 'week' ? (selectedKey ? formatWeekRange(selectedKey) : '') : (selectedKey ? `${monthNames[Number(selectedKey.slice(5, 7)) - 1]} ${selectedKey.slice(0, 4)}` : '');
+  const report = useMemo(() => buildReport(periodLabel, periodTrades, reviews, reviewKeys), [periodLabel, periodTrades, reviews]);
+
+  const copyText = async text => { try { await navigator.clipboard.writeText(text); setCopied(true); setTimeout(() => setCopied(false), 1500); } catch { } };
+  const downloadText = text => { triggerDownload(text, `report-${selectedKey || 'export'}.txt`, 'text/plain'); };
+
+  if (trades.length === 0) return (<div style={{ background: C.card, border: `1px dashed ${C.border}`, borderRadius: 12, padding: 30, textAlign: 'center', color: C.muted, fontSize: 14 }}>Nessun trade disponibile per generare un report</div>);
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
+        <div style={{ display: 'flex', gap: 6 }}>
+          {[['week', 'Settimana'], ['month', 'Mese']].map(([v, l]) => (
+            <button key={v} onClick={() => setMode(v)} style={{ padding: '8px 18px', borderRadius: 6, cursor: 'pointer', fontSize: 14, fontWeight: 700, border: `1px solid ${mode === v ? C.accent : C.border}`, background: mode === v ? `${C.accent}15` : C.card2, color: mode === v ? C.accent : C.muted }}>{l}</button>
+          ))}
+        </div>
+        <select value={selectedKey} onChange={e => setSelectedKey(e.target.value)} style={{ background: C.card2, border: `1px solid ${C.border}`, color: C.text, borderRadius: 6, padding: '8px 14px', fontSize: 14, width: 240, fontFamily: 'inherit' }}>
+          {keys.map(k => (<option key={k} value={k}>{mode === 'week' ? formatWeekRange(k) : `${monthNames[Number(k.slice(5,7)) - 1]} ${k.slice(0,4)}`}</option>))}
+        </select>
+        <span style={{ fontSize: 13, color: C.muted }}>{periodTrades.length} trade nel periodo</span>
+      </div>
+
+      {!report ? (
+        <div style={{ background: C.card, border: `1px dashed ${C.border}`, borderRadius: 12, padding: 30, textAlign: 'center', color: C.muted, fontSize: 14 }}>Nessun trade in questo periodo</div>
+      ) : (
+        <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, overflow: 'hidden' }}>
+          <div style={{ padding: '12px 18px', background: C.card2, display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
+            <div style={{ display: 'flex', gap: 6 }}>
+              {[['summary', '📊 Riepilogo'], ['prompt', '🤖 Prompt per AI']].map(([v, l]) => (
+                <button key={v} onClick={() => setView(v)} style={{ padding: '7px 16px', borderRadius: 6, cursor: 'pointer', fontSize: 13, fontWeight: 700, border: `1px solid ${view === v ? C.accent : C.border}`, background: view === v ? `${C.accent}15` : C.card, color: view === v ? C.accent : C.muted }}>{l}</button>
+              ))}
+            </div>
+            <div style={{ display: 'flex', gap: 6 }}>
+              <button onClick={() => copyText(view === 'summary' ? report.summary : report.prompt)} style={{ padding: '7px 16px', borderRadius: 6, border: `1px solid ${C.border}`, background: C.card, color: copied ? C.profit : C.text, fontSize: 13, fontWeight: 700, cursor: 'pointer' }}>{copied ? '✓ Copiato' : '📋 Copia'}</button>
+              <button onClick={() => downloadText(view === 'summary' ? report.summary : report.prompt)} style={{ padding: '7px 16px', borderRadius: 6, border: `1px solid ${C.border}`, background: C.card, color: C.text, fontSize: 13, fontWeight: 700, cursor: 'pointer' }}>⬇ .txt</button>
+            </div>
+          </div>
+          <pre style={{ margin: 0, padding: 20, fontSize: 13, fontFamily: 'monospace', color: C.text, whiteSpace: 'pre-wrap', maxHeight: 520, overflowY: 'auto', lineHeight: 1.55 }}>{view === 'summary' ? report.summary : report.prompt}</pre>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function triggerDownload(content, filename, mime = 'text/plain') {
+  try {
+    const blob = new Blob([content], { type: mime });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+    return true;
+  } catch { return false; }
+}
+
+function ExportModal({ title, content, filename, mime, onClose }) {
+  const [copied, setCopied] = useState(false);
+  const [downloadTried, setDownloadTried] = useState(false);
+  const copy = async () => { try { await navigator.clipboard.writeText(content); setCopied(true); setTimeout(() => setCopied(false), 1500); } catch { } };
+  const download = () => { triggerDownload(content, filename, mime); setDownloadTried(true); };
+
+  return (
+    <div onClick={e => { if (e.target === e.currentTarget) onClose(); }} style={{ position: 'fixed', inset: 0, zIndex: 400, background: 'rgba(0,0,0,0.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 }}>
+      <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 14, padding: 22, width: 660, maxHeight: '82vh', display: 'flex', flexDirection: 'column' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+          <span style={{ fontWeight: 800, fontSize: 16, color: C.text }}>{title}</span>
+          <span onClick={onClose} style={{ cursor: 'pointer', color: C.muted, fontSize: 20 }}>✕</span>
+        </div>
+        <div style={{ fontSize: 13, color: C.muted, marginBottom: 10 }}>Il download automatico può non funzionare in alcuni browser/ambienti — il testo è comunque qui sotto.</div>
+        <textarea readOnly value={content} onClick={e => e.target.select()} style={{ flex: 1, minHeight: 340, background: C.card2, border: `1px solid ${C.border}`, color: C.text, borderRadius: 8, padding: 14, fontSize: 13, fontFamily: 'monospace', resize: 'vertical' }} />
+        <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>
+          <button onClick={copy} style={{ padding: '9px 18px', borderRadius: 6, border: 'none', background: copied ? C.profit : C.accent, color: '#06121a', fontWeight: 800, fontSize: 13, cursor: 'pointer' }}>{copied ? '✓ Copiato negli appunti' : '📋 Copia tutto'}</button>
+          <button onClick={download} style={{ padding: '9px 18px', borderRadius: 6, border: `1px solid ${C.border}`, background: C.card2, color: C.text, fontWeight: 700, fontSize: 13, cursor: 'pointer' }}>⬇ {downloadTried ? 'Riprova download' : 'Prova download file'}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const TAB_ITEMS = [
+  ['calendar', '📅', 'Calendario'],
+  ['log', '📋', 'Trade Log'],
+  ['review', '📝', 'Revisione'],
+  ['strategy', '📊', 'Strategia & Stats'],
+  ['report', '📄', 'Report'],
+  ['import', '⬆', 'Import'],
+];
+
+function Sidebar({ tab, setTab, theme, toggleTheme, onExport, onAddTrade }) {
+  return (
+    <div style={{ width: 230, flexShrink: 0, background: C.card, borderRight: `1px solid ${C.border}`, display: 'flex', flexDirection: 'column', padding: '22px 16px', gap: 4, height: '100vh', overflowY: 'auto' }}>
+      <div style={{ padding: '0 8px 16px' }}>
+        <div style={{ fontWeight: 800, fontSize: 18, color: C.text }}>📓 Trading Journal</div>
+      </div>
+      <button onClick={onAddTrade} style={{ margin: '0 0 16px', padding: '12px 14px', borderRadius: 8, border: `1px solid ${C.accent}55`, background: `${C.accent}15`, color: C.accent, fontWeight: 800, fontSize: 14, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}>＋ Aggiungi trade</button>
+      {TAB_ITEMS.map(([key, icon, label]) => (
+        <button key={key} onClick={() => setTab(key)} style={{ display: 'flex', alignItems: 'center', gap: 12, textAlign: 'left', padding: '11px 12px', borderRadius: 8, cursor: 'pointer', fontSize: 15, fontWeight: 700, border: 'none', background: tab === key ? `${C.accent}18` : 'transparent', color: tab === key ? C.accent : C.muted }}>
+          <span style={{ fontSize: 17 }}>{icon}</span><span>{label}</span>
+        </button>
+      ))}
+      <div style={{ flex: 1 }} />
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8, paddingTop: 14, borderTop: `1px solid ${C.border}` }}>
+        <button onClick={toggleTheme} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 12px', borderRadius: 8, border: `1px solid ${C.border}`, background: C.card2, color: C.text, fontSize: 14, fontWeight: 700, cursor: 'pointer' }}>{theme === 'dark' ? '☀️ Tema chiaro' : '🌙 Tema scuro'}</button>
+        <button onClick={onExport} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 12px', borderRadius: 8, border: `1px solid ${C.border}`, background: C.card2, color: C.text, fontSize: 14, fontWeight: 700, cursor: 'pointer' }}>⬇ Export JSON</button>
+      </div>
+    </div>
+  );
+}
+
+function MobileMenu({ tab, setTab, theme, toggleTheme, onExport, onAddTrade, onClose }) {
+  return (
+    <div onClick={e => { if (e.target === e.currentTarget) onClose(); }} style={{ position: 'fixed', inset: 0, zIndex: 500, background: 'rgba(0,0,0,0.6)', display: 'flex', justifyContent: 'flex-end' }}>
+      <div style={{ width: '78%', maxWidth: 300, height: '100%', background: C.card, borderLeft: `1px solid ${C.border}`, padding: 18, display: 'flex', flexDirection: 'column', gap: 4, overflowY: 'auto' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+          <span style={{ fontWeight: 800, fontSize: 17, color: C.text }}>📓 Menu</span>
+          <span onClick={onClose} style={{ cursor: 'pointer', color: C.muted, fontSize: 22, padding: 4 }}>✕</span>
+        </div>
+        <button onClick={() => { onAddTrade(); onClose(); }} style={{ margin: '0 0 14px', padding: '12px 14px', borderRadius: 8, border: `1px solid ${C.accent}55`, background: `${C.accent}15`, color: C.accent, fontWeight: 800, fontSize: 15, cursor: 'pointer' }}>＋ Aggiungi trade</button>
+        {TAB_ITEMS.map(([key, icon, label]) => (
+          <button key={key} onClick={() => { setTab(key); onClose(); }} style={{ display: 'flex', alignItems: 'center', gap: 12, textAlign: 'left', padding: '12px 12px', borderRadius: 8, cursor: 'pointer', fontSize: 15, fontWeight: 700, border: 'none', background: tab === key ? `${C.accent}18` : 'transparent', color: tab === key ? C.accent : C.muted }}>
+            <span style={{ fontSize: 17 }}>{icon}</span><span>{label}</span>
+          </button>
+        ))}
+        <div style={{ flex: 1 }} />
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, paddingTop: 14, borderTop: `1px solid ${C.border}` }}>
+          <button onClick={toggleTheme} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '11px', borderRadius: 8, border: `1px solid ${C.border}`, background: C.card2, color: C.text, fontSize: 14, fontWeight: 700, cursor: 'pointer' }}>{theme === 'dark' ? '☀️ Tema chiaro' : '🌙 Tema scuro'}</button>
+          <button onClick={() => { onExport(); onClose(); }} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '11px', borderRadius: 8, border: `1px solid ${C.border}`, background: C.card2, color: C.text, fontSize: 14, fontWeight: 700, cursor: 'pointer' }}>⬇ Export JSON</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function TradingJournal() {
+  const [trades, setTrades] = useState([]);
+  const [reviews, setReviews] = useState({});
+  const [pendingNotes, setPendingNotes] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [selectedDay, setSelectedDay] = useState(null);
+  const [calendarView, setCalendarView] = useState('month');
+  const [calendarCursor, setCalendarCursor] = useState(() => { const d = new Date(); return { y: d.getFullYear(), m: d.getMonth() }; });
+  const [tab, setTab] = useState('calendar');
+  const [filters, setFilters] = useState({
+    dateFrom: '', dateTo: '', tags: [], ticker: '',
+    side: '', weekdays: [], priceBuckets: [], timeBuckets: [],
+  });
+  const [theme, setTheme] = useState('dark');
+  const [isDesktop, setIsDesktop] = useState(() => typeof window !== 'undefined' ? window.innerWidth >= 820 : true);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [addFormOpen, setAddFormOpen] = useState(false);
+
+  useEffect(() => {
+    const onResize = () => setIsDesktop(window.innerWidth >= 820);
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+
+  applyTheme(theme);
+
+  const toggleTheme = async () => { const next = theme === 'dark' ? 'light' : 'dark'; setTheme(next); await dataStore.saveTheme(next); };
+
+  const filteredTrades = useMemo(() => {
+    return trades.filter(t => {
+      if (filters.dateFrom && t.date < filters.dateFrom) return false;
+      if (filters.dateTo && t.date > filters.dateTo) return false;
+      if (filters.tags && filters.tags.length && !filters.tags.some(tag => getTags(t).includes(tag))) return false;
+      if (filters.ticker && !t.ticker.includes(filters.ticker)) return false;
+      if (filters.side) {
+        const s = t.side === 'short' ? 'Short' : t.side === 'long' ? 'Long' : '';
+        if (s !== filters.side) return false;
+      }
+      if (filters.weekdays && filters.weekdays.length) {
+        const wd = WEEKDAY_NAMES[(new Date(t.date + 'T00:00:00').getDay() + 6) % 7];
+        if (!filters.weekdays.includes(wd)) return false;
+      }
+      if (filters.priceBuckets && filters.priceBuckets.length) {
+        if (t.entryPrice == null || !filters.priceBuckets.includes(priceBucket(t.entryPrice))) return false;
+      }
+      if (filters.timeBuckets && filters.timeBuckets.length) {
+        if (!t.time || !filters.timeBuckets.includes(timeBucket(t.time))) return false;
+      }
+      return true;
+    });
+  }, [trades, filters]);
+
+  useEffect(() => {
+    Promise.all([dataStore.getTrades(), dataStore.getReviews(), dataStore.getPendingNotes(), dataStore.getTheme()]).then(([t, r, n, th]) => {
+      setTrades(t); setReviews(r); setPendingNotes(n); setTheme(th); setLoading(false);
+    });
+  }, []);
+
+  const addPendingNote = useCallback(async (note) => { const updated = [...pendingNotes, note]; setPendingNotes(updated); await dataStore.savePendingNotes(updated); }, [pendingNotes]);
+  const deletePendingNote = useCallback(async (id) => { const updated = pendingNotes.filter(n => n.id !== id); setPendingNotes(updated); await dataStore.savePendingNotes(updated); }, [pendingNotes]);
+  const saveReview = useCallback(async (weekKey, review) => { const updated = { ...reviews, [weekKey]: review }; setReviews(updated); await dataStore.saveReviews(updated); }, [reviews]);
+  const addTrade = useCallback(async (trade) => { const updated = [...trades, trade]; setTrades(updated); await dataStore.saveTrades(updated); }, [trades]);
+  const updateTrade = useCallback(async (trade) => { const updated = trades.map(t => t.id === trade.id ? trade : t); setTrades(updated); await dataStore.saveTrades(updated); }, [trades]);
+  const deleteTrade = useCallback(async (id) => { const updated = trades.filter(t => t.id !== id); setTrades(updated); await dataStore.saveTrades(updated); }, [trades]);
+  const duplicateTrade = useCallback(async (trade) => { const copy = { ...trade, id: uuid() }; const updated = [...trades, copy]; setTrades(updated); await dataStore.saveTrades(updated); }, [trades]);
+
+  const allTags = useMemo(() => {
+    const s = new Set();
+    trades.forEach(t => getTags(t).forEach(tag => s.add(tag)));
+    return Array.from(s).sort();
+  }, [trades]);
+
+  const importTrades = useCallback(async (newTrades, usedNoteIds = []) => {
+    const updated = [...trades, ...newTrades];
+    setTrades(updated);
+    await dataStore.saveTrades(updated);
+    if (usedNoteIds.length) {
+      const updatedNotes = pendingNotes.map(n => usedNoteIds.includes(n.id) ? { ...n, used: true } : n);
+      setPendingNotes(updatedNotes);
+      await dataStore.savePendingNotes(updatedNotes);
+    }
+  }, [trades, pendingNotes]);
+
+
+  const [showExportModal, setShowExportModal] = useState(false);
+  const exportJsonContent = useMemo(() => JSON.stringify({ trades, reviews, pendingNotes }, null, 2), [trades, reviews, pendingNotes]);
+
+  const dayTrades = selectedDay ? filteredTrades.filter(t => t.date === selectedDay) : [];
+  const openAddForm = () => setAddFormOpen(true);
+
+  if (loading) return <div style={{ color: C.muted, padding: 30, background: C.bg }}>Caricamento…</div>;
+
+  const shellStyle = isDesktop
+    ? { background: C.bg, height: '100vh', overflow: 'hidden', fontFamily: 'system-ui, sans-serif', display: 'flex', flexDirection: 'row' }
+    : { background: C.bg, minHeight: '100vh', fontFamily: 'system-ui, sans-serif', display: 'flex', flexDirection: 'column' };
+
+  const mainStyle = isDesktop
+    ? { flex: 1, minWidth: 0, height: '100vh', display: 'flex', flexDirection: 'column', overflow: 'hidden' }
+    : { flex: 1, minWidth: 0, padding: 18, display: 'flex', flexDirection: 'column', gap: 16 };
+
+  const contentStyle = isDesktop
+    ? { flex: 1, minHeight: 0, overflowY: 'auto', padding: '16px 28px 24px', display: 'flex', flexDirection: 'column', gap: 14 }
+    : { display: 'flex', flexDirection: 'column', gap: 16 };
+
+  return (
+    <div style={shellStyle}>
+
+      {isDesktop && (<Sidebar tab={tab} setTab={setTab} theme={theme} toggleTheme={toggleTheme} onExport={() => setShowExportModal(true)} onAddTrade={openAddForm} />)}
+
+      <div style={mainStyle}>
+
+        {!isDesktop && (
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+            <div style={{ fontWeight: 800, fontSize: 17, color: C.text, minWidth: 0 }}>
+              {TAB_ITEMS.find(([k]) => k === tab)?.[1]} {TAB_ITEMS.find(([k]) => k === tab)?.[2]}
+            </div>
+            <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
+              <button onClick={openAddForm} style={{ padding: '9px 13px', borderRadius: 8, border: `1px solid ${C.accent}55`, background: `${C.accent}15`, color: C.accent, fontSize: 14, fontWeight: 800, cursor: 'pointer' }}>＋ Trade</button>
+              <button onClick={() => setMobileMenuOpen(true)} title="Menu" style={{ padding: '9px 13px', borderRadius: 8, border: `1px solid ${C.border}`, background: C.card2, color: C.text, fontSize: 17, cursor: 'pointer', lineHeight: 1 }}>☰</button>
+            </div>
+          </div>
+        )}
+
+        {!isDesktop && mobileMenuOpen && (<MobileMenu tab={tab} setTab={setTab} theme={theme} toggleTheme={toggleTheme} onExport={() => setShowExportModal(true)} onAddTrade={openAddForm} onClose={() => setMobileMenuOpen(false)} />)}
+
+        {isDesktop && (
+          <div style={{ padding: '20px 28px 0' }}>
+            <div style={{ fontWeight: 800, fontSize: 22, color: C.text, letterSpacing: '-0.01em' }}>
+              {TAB_ITEMS.find(([k]) => k === tab)?.[1]} {TAB_ITEMS.find(([k]) => k === tab)?.[2]}
+            </div>
+          </div>
+        )}
+
+        <div style={contentStyle}>
+
+          {showExportModal && (<ExportModal title="📦 Export completo (trade + revisioni)" content={exportJsonContent} filename={`trading-journal-${Date.now()}.json`} mime="application/json" onClose={() => setShowExportModal(false)} />)}
+
+          {addFormOpen && (<AddTradeForm onAddTrade={addTrade} onAddNote={addPendingNote} allTags={allTags} onClose={() => setAddFormOpen(false)} isDesktop={isDesktop} />)}
+
+          <KpiStrip trades={filteredTrades} isDesktop={isDesktop} />
+
+          {tab !== 'import' && (<FilterBar trades={trades} filters={filters} setFilters={setFilters} />)}
+
+          {tab === 'calendar' && (
+            <>
+              <div style={{ display: 'flex', gap: 6 }}>
+                {[['month', '📅 Mese'], ['year', '🗓 Anno']].map(([v, l]) => (
+                  <button key={v} onClick={() => setCalendarView(v)} style={{ padding: '7px 16px', borderRadius: 6, cursor: 'pointer', fontSize: 13, fontWeight: 700, border: `1px solid ${calendarView === v ? C.accent : C.border}`, background: calendarView === v ? `${C.accent}15` : C.card2, color: calendarView === v ? C.accent : C.muted }}>{l}</button>
+                ))}
+              </div>
+              {calendarView === 'month' ? (
+                <>
+                  <div style={{ display: 'grid', gridTemplateColumns: isDesktop ? 'minmax(0, 1fr) 360px' : '1fr', gap: 20, alignItems: 'start' }}>
+                    <MonthCalendar trades={filteredTrades} onDayClick={setSelectedDay} isDesktop={isDesktop} cursor={calendarCursor} setCursor={setCalendarCursor} />
+                    {isDesktop && (<LastMonthsSidebar trades={filteredTrades} onDayClick={setSelectedDay} />)}
+                  </div>
+                  {selectedDay && (
+                    <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, padding: 18, maxWidth: 720 }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 10 }}>
+                        <span style={{ fontSize: 14, fontWeight: 700, color: C.accent }}>Trade del {selectedDay}</span>
+                        <span onClick={() => setSelectedDay(null)} style={{ color: C.muted, cursor: 'pointer', fontSize: 14 }}>✕</span>
+                      </div>
+                      {dayTrades.map(t => (
+                        <div key={t.id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 14, padding: '7px 0', borderBottom: `1px solid ${C.border}` }}>
+                          <span style={{ color: C.text, fontWeight: 700 }}>{t.ticker}</span>
+                          <span style={{ color: C.muted }}>{getTags(t).join(', ')}</span>
+                          <span style={{ color: t.pnl >= 0 ? C.profit : C.loss, fontFamily: 'monospace', fontWeight: 700 }}>{fmt$(t.pnl)}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </>
+              ) : (<YearView trades={filteredTrades} onDayClick={setSelectedDay} />)}
+            </>
+          )}
+
+          {tab === 'log' && (<TradeLog trades={filteredTrades} onUpdate={updateTrade} onDelete={deleteTrade} onDuplicate={duplicateTrade} allTags={allTags} isDesktop={isDesktop} />)}
+          {tab === 'review' && (<WeeklyReview trades={filteredTrades} reviews={reviews} onSaveReview={saveReview} isDesktop={isDesktop} />)}
+          {tab === 'strategy' && (<StrategyView trades={filteredTrades} />)}
+          {tab === 'report' && (<ReportPanel trades={trades} reviews={reviews} />)}
+          {tab === 'import' && (<ImportPanel existingTrades={trades} onImport={importTrades} pendingNotes={pendingNotes} onDeleteNote={deletePendingNote} />)}
+
+        </div>
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(
+  <PasswordGate><TradingJournal /></PasswordGate>
+);
+</script>
+</body>
+</html>
