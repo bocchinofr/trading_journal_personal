@@ -1322,6 +1322,30 @@ function WeekTradeRow({ t, isDesktop }) {
   );
 }
 
+function TagBarCard({ title, rows }) {
+  if (!rows.length) return null;
+  const maxAbs = Math.max(...rows.map(r => Math.abs(r.totalPnl)), 1);
+  return (
+    <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: 18 }}>
+      <div style={{ fontSize: 12, color: C.muted, textTransform: 'uppercase', letterSpacing: '.07em', marginBottom: 14, fontWeight: 700 }}>{title}</div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+        {rows.map(r => (
+          <div key={r.tag}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 5 }}>
+              <span style={{ width: 150, fontSize: 13, color: C.text, flexShrink: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.tag}</span>
+              <div style={{ flex: 1, height: 8, background: C.border, borderRadius: 4, overflow: 'hidden' }}>
+                <div style={{ height: '100%', width: `${(Math.abs(r.totalPnl) / maxAbs) * 100}%`, background: r.totalPnl >= 0 ? C.profit : C.loss, borderRadius: 4 }} />
+              </div>
+              <span style={{ width: 70, textAlign: 'right', fontSize: 13, fontWeight: 700, fontFamily: 'monospace', color: r.totalPnl >= 0 ? C.profit : C.loss, flexShrink: 0 }}>{fmt$(r.totalPnl)}</span>
+            </div>
+            <div style={{ fontSize: 11, color: C.muted, marginLeft: 160 }}>×{r.n} · WR {(r.winrate * 100).toFixed(0)}%</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function WeeklyReview({ trades, reviews, onSaveReview, isDesktop }) {
   const [expandedWeek, setExpandedWeek] = useState(null);
   const [draft, setDraft] = useState(null);
@@ -1350,10 +1374,17 @@ function WeeklyReview({ trades, reviews, onSaveReview, isDesktop }) {
       const winrate = n ? list.filter(t => t.pnl > 0).length / n : 0;
       const totalPnl = list.reduce((s, t) => s + t.pnl, 0);
       return { tag, n, winrate, avgPnl: n ? totalPnl / n : 0, totalPnl };
-    }).sort((a, b) => b.n - a.n);
+    }).sort((a, b) => b.totalPnl - a.totalPnl);
   };
   const entryStats = useMemo(() => tagJournalStats('entryTags'), [trades]);
   const eventStats = useMemo(() => tagJournalStats('eventTags'), [trades]);
+
+  const insight = useMemo(() => {
+    const candidates = [...entryStats, ...eventStats].filter(s => s.n >= 3 && s.avgPnl < 0);
+    if (!candidates.length) return null;
+    const worst = candidates.reduce((a, b) => (b.avgPnl < a.avgPnl ? b : a));
+    return `Il tag "${worst.tag}" ti costa in media ${fmt$(worst.avgPnl)}/trade su ${worst.n} occorrenze.`;
+  }, [entryStats, eventStats]);
 
   const openWeek = w => {
     if (expandedWeek === w.weekKey) { setExpandedWeek(null); return; }
@@ -1380,43 +1411,17 @@ function WeeklyReview({ trades, reviews, onSaveReview, isDesktop }) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      {insight && (
+        <div style={{
+          background: 'rgba(164,230,255,0.06)', border: '1px solid rgba(164,230,255,0.25)',
+          borderRadius: 10, padding: '12px 16px', fontSize: 13, color: C.accent,
+        }}>💡 {insight}</div>
+      )}
+
       {(entryStats.length > 0 || eventStats.length > 0) && (
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(380px, 1fr))', gap: 14 }}>
-          {entryStats.length > 0 && (
-            <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: 18 }}>
-              <div style={{ fontSize: 12, color: C.muted, textTransform: 'uppercase', letterSpacing: '.07em', marginBottom: 12, fontWeight: 700 }}>Perché entri più spesso</div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                {entryStats.map(e => (
-                  <div key={e.tag} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 14px', background: C.card2, borderRadius: 8, border: `1px solid ${C.border}` }}>
-                    <span style={{ fontSize: 15, color: C.text, fontWeight: 700 }}>{e.tag}</span>
-                    <div style={{ display: 'flex', gap: 14, alignItems: 'baseline' }}>
-                      <span style={{ fontSize: 12, color: C.muted }}>×{e.n} · WR {(e.winrate * 100).toFixed(0)}%</span>
-                      <span style={{ fontSize: 16, fontWeight: 800, fontFamily: 'monospace', color: e.totalPnl >= 0 ? C.profit : C.loss }}>{fmt$(e.totalPnl)}</span>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-          {eventStats.length > 0 && (
-            <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: 18 }}>
-              <div style={{ fontSize: 12, color: C.muted, textTransform: 'uppercase', letterSpacing: '.07em', marginBottom: 12, fontWeight: 700 }}>Cosa succede più spesso</div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                {eventStats.map(e => {
-                  const isPositive = POSITIVE_EVENT_TAGS.includes(e.tag);
-                  return (
-                    <div key={e.tag} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 14px', background: C.card2, borderRadius: 8, border: `1px solid ${C.border}` }}>
-                      <span style={{ fontSize: 15, color: isPositive ? C.profit : C.text, fontWeight: 700 }}>{e.tag}</span>
-                      <div style={{ display: 'flex', gap: 14, alignItems: 'baseline' }}>
-                        <span style={{ fontSize: 12, color: C.muted }}>×{e.n}</span>
-                        <span style={{ fontSize: 16, fontWeight: 800, fontFamily: 'monospace', color: e.totalPnl >= 0 ? C.profit : C.loss }}>{fmt$(e.totalPnl)}</span>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          )}
+          <TagBarCard title="Perché sei entrato → PnL" rows={entryStats} />
+          <TagBarCard title="Cosa è successo → PnL" rows={eventStats} />
         </div>
       )}
 
@@ -1730,6 +1735,7 @@ function FilterBar({ trades, filters, setFilters }) {
   const reset = () => setFilters({
     dateFrom: '', dateTo: '', tags: [], ticker: '',
     side: '', weekdays: [], priceBuckets: [], timeBuckets: [],
+    entryTags: [], eventTags: [],
   });
 
   const active = !!(
@@ -1738,7 +1744,9 @@ function FilterBar({ trades, filters, setFilters }) {
     filters.side ||
     (filters.weekdays && filters.weekdays.length) ||
     (filters.priceBuckets && filters.priceBuckets.length) ||
-    (filters.timeBuckets && filters.timeBuckets.length)
+    (filters.timeBuckets && filters.timeBuckets.length) ||
+    (filters.entryTags && filters.entryTags.length) ||
+    (filters.eventTags && filters.eventTags.length)
   );
 
   const inputStyle = { background: C.card2, border: `1px solid ${C.border}`, color: C.text, borderRadius: 6, padding: '7px 11px', fontSize: 14, height: 36, fontFamily: 'inherit' };
@@ -1760,6 +1768,8 @@ function FilterBar({ trades, filters, setFilters }) {
       </div>
 
       <MultiSelectDropdown label="Tag" options={allTags} selected={filters.tags || []} onChange={v => setFilters({ ...filters, tags: v })} width={180} placeholder="Tutti i tag" />
+      <MultiSelectDropdown label="Perché sei entrato" options={ENTRY_TAGS} selected={filters.entryTags || []} onChange={v => setFilters({ ...filters, entryTags: v })} width={190} placeholder="Tutti" />
+      <MultiSelectDropdown label="Cosa è successo" options={EVENT_TAGS} selected={filters.eventTags || []} onChange={v => setFilters({ ...filters, eventTags: v })} width={190} placeholder="Tutti" />
       <MultiSelectDropdown label="Giorno" options={WEEKDAY_NAMES} selected={filters.weekdays || []} onChange={v => setFilters({ ...filters, weekdays: v })} width={150} placeholder="Tutti" />
       <MultiSelectDropdown label="Prezzo" options={PRICE_ORDER} selected={filters.priceBuckets || []} onChange={v => setFilters({ ...filters, priceBuckets: v })} width={150} placeholder="Tutte" />
       <MultiSelectDropdown label="Orario" options={TIME_ORDER} selected={filters.timeBuckets || []} onChange={v => setFilters({ ...filters, timeBuckets: v })} width={170} placeholder="Tutte" />
@@ -2153,9 +2163,10 @@ function TradingJournal() {
   const [calendarCursor, setCalendarCursor] = useState(() => { const d = new Date(); return { y: d.getFullYear(), m: d.getMonth() }; });
   const [tab, setTab] = useState('calendar');
   const [filters, setFilters] = useState({
-    dateFrom: '', dateTo: '', tags: [], ticker: '',
-    side: '', weekdays: [], priceBuckets: [], timeBuckets: [],
-  });
+      dateFrom: '', dateTo: '', tags: [], ticker: '',
+      side: '', weekdays: [], priceBuckets: [], timeBuckets: [],
+      entryTags: [], eventTags: [],
+    });
   const [theme, setTheme] = useState('dark');
   const [isDesktop, setIsDesktop] = useState(() => typeof window !== 'undefined' ? window.innerWidth >= 820 : true);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -2190,6 +2201,14 @@ function TradingJournal() {
       }
       if (filters.timeBuckets && filters.timeBuckets.length) {
         if (!t.time || !filters.timeBuckets.includes(timeBucket(t.time))) return false;
+      }
+      if (filters.entryTags && filters.entryTags.length) {
+        const et = t.journal?.entryTags || [];
+        if (!filters.entryTags.some(tag => et.includes(tag))) return false;
+      }
+      if (filters.eventTags && filters.eventTags.length) {
+        const ev = t.journal?.eventTags || [];
+        if (!filters.eventTags.some(tag => ev.includes(tag))) return false;
       }
       return true;
     });
