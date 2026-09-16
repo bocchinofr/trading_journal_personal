@@ -2190,11 +2190,15 @@ function TradingJournal() {
     });
   const [theme, setTheme] = useState('dark');
   const [isDesktop, setIsDesktop] = useState(() => typeof window !== 'undefined' ? window.innerWidth >= 820 : true);
+  const [isWide, setIsWide] = useState(() => typeof window !== 'undefined' ? window.innerWidth >= 1300 : true);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [addFormOpen, setAddFormOpen] = useState(false);
 
   useEffect(() => {
-    const onResize = () => setIsDesktop(window.innerWidth >= 820);
+    const onResize = () => {
+      setIsDesktop(window.innerWidth >= 820);
+      setIsWide(window.innerWidth >= 1300);
+    };
     window.addEventListener('resize', onResize);
     return () => window.removeEventListener('resize', onResize);
   }, []);
@@ -2335,7 +2339,7 @@ function TradingJournal() {
               </div>
               {calendarView === 'month' ? (
                 <>
-                  <div style={{ display: 'grid', gridTemplateColumns: isDesktop ? 'minmax(0, 1fr) 360px' : '1fr', gap: 20, alignItems: 'start' }}>
+                  <div style={{ display: 'grid', gridTemplateColumns: isWide ? 'minmax(0, 1fr) 360px' : '1fr', gap: 20, alignItems: 'start' }}>
                     <MonthCalendar trades={filteredTrades} onDayClick={setSelectedDay} isDesktop={isDesktop} cursor={calendarCursor} setCursor={setCalendarCursor} />
                     {isDesktop && (<LastMonthsSidebar trades={filteredTrades} onDayClick={setSelectedDay} />)}
                   </div>
