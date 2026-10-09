@@ -9,7 +9,7 @@
   #root { min-height: 100vh; }
   * { box-sizing: border-box; }
   ::-webkit-scrollbar { width: 8px; height: 8px; }
-  ::-webkit-scrollbar-thumb { background: #232d38; border-radius: 4px; }
+  ::-webkit-scrollbar-thumb { background: var(--sb-thumb, #232d38); border-radius: 4px; }
 
   /* Desktop: nessuno scroll a livello di pagina */
   @media (min-width: 820px) {
@@ -44,14 +44,16 @@ const THEMES = {
     text: '#e8edf2', muted: '#8d9aa6', accent: '#a4e6ff', profit: '#66dd8b',
     loss: '#ffaaa4', yellow: '#f3d36b',
     calPos: '95,216,143', calNeg: '255,138,128', calMin: 0.15, calRange: 0.55,
-    shadow: '0 10px 26px rgba(0,0,0,0.45)'
+    shadow: '0 10px 26px rgba(0,0,0,0.45)',
+    onAccent: '#06121a', thumb: '#232d38'
   },
   light: {
-    bg: '#e8edf0', card: '#f3f6f7', card2: '#e5ebee', border: '#cfd9df',
-    text: '#2b3a46', muted: '#657683', accent: '#3f7fa3', profit: '#2f7d55',
-    loss: '#b85a54', yellow: '#9c7a2e',
-    calPos: '120,190,150', calNeg: '226,150,145', calMin: 0.12, calRange: 0.28,
-    shadow: '0 8px 22px rgba(60,80,95,0.16)'
+    bg: '#f1f3e8', card: '#f9faf4', card2: '#eceee0', border: '#dadfca',
+    text: '#1f2a24', muted: '#737d70', accent: '#3d6b50', profit: '#1a7a43',
+    loss: '#b8503f', yellow: '#a67c3d',
+    calPos: '90,160,110', calNeg: '214,130,110', calMin: 0.12, calRange: 0.30,
+    shadow: '0 8px 22px rgba(50,70,50,0.14)',
+    onAccent: '#ffffff', thumb: '#c6ccb3'
   }
 };
 let C = { ...THEMES.dark };
@@ -100,6 +102,7 @@ function applyTheme(theme) {
   document.documentElement.style.background = C.bg;
   document.body.style.background = C.bg;
   document.body.style.color = C.text;
+  document.documentElement.style.setProperty('--sb-thumb', C.thumb);
 }
 
 function uuid() {
@@ -1036,7 +1039,7 @@ function AddTradeForm({ onAddTrade, onAddNote, allTags = [], onClose, isDesktop 
       )}
 
       <div style={{ display: 'flex', gap: 8 }}>
-        <button onClick={mode === 'full' ? submitFull : submitQuick} style={{ padding: '9px 20px', borderRadius: 6, border: 'none', background: C.profit, color: '#06120a', fontWeight: 800, fontSize: 13, cursor: 'pointer' }}>Salva {mode === 'quick' ? 'nota' : 'trade'}</button>
+        <button onClick={mode === 'full' ? submitFull : submitQuick} style={{ padding: '9px 20px', borderRadius: 6, border: 'none', background: C.profit, color: C.onAccent, fontWeight: 800, fontSize: 13, cursor: 'pointer' }}>Salva {mode === 'quick' ? 'nota' : 'trade'}</button>
         <button onClick={reset} style={{ padding: '9px 20px', borderRadius: 6, border: `1px solid ${C.border}`, background: 'transparent', color: C.muted, fontSize: 13, cursor: 'pointer' }}>Annulla</button>
       </div>
     </div>
@@ -1196,7 +1199,7 @@ function TradeLog({ trades, onUpdate, onDelete, onDuplicate, allTags = [], isDes
                     </div>
                   </div>
                   <div style={{ display: 'flex', gap: 8, marginTop: 16, flexWrap: 'wrap' }}>
-                    <button onClick={() => saveNote(t)} style={{ padding: '9px 18px', borderRadius: 6, border: 'none', background: C.accent, color: '#06121a', fontWeight: 800, fontSize: 13, cursor: 'pointer' }}>Salva</button>
+                    <button onClick={() => saveNote(t)} style={{ padding: '9px 18px', borderRadius: 6, border: 'none', background: C.accent, color: C.onAccent, fontWeight: 800, fontSize: 13, cursor: 'pointer' }}>Salva</button>
                     <button onClick={() => onDuplicate(t)} style={{ padding: '9px 18px', borderRadius: 6, border: `1px solid ${C.border}`, background: 'transparent', color: C.text, fontWeight: 700, fontSize: 13, cursor: 'pointer' }}>⧉ Duplica trade</button>
                     <button onClick={() => onDelete(t.id)} style={{ padding: '9px 18px', borderRadius: 6, border: `1px solid ${C.loss}55`, background: 'transparent', color: C.loss, fontWeight: 700, fontSize: 13, cursor: 'pointer' }}>Elimina trade</button>
                   </div>
@@ -1549,7 +1552,7 @@ function WeeklyReview({ trades, reviews, onSaveReview, isDesktop }) {
                 </div>
 
                 <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                  <button onClick={() => save(w.weekKey)} style={{ padding: '10px 22px', borderRadius: 6, border: 'none', background: C.accent, color: '#06121a', fontWeight: 800, fontSize: 14, cursor: 'pointer' }}>Salva revisione</button>
+                  <button onClick={() => save(w.weekKey)} style={{ padding: '10px 22px', borderRadius: 6, border: 'none', background: C.accent, color: C.onAccent, fontWeight: 800, fontSize: 14, cursor: 'pointer' }}>Salva revisione</button>
                   {saved && (<span style={{ fontSize: 12, color: C.profit, fontWeight: 700 }}>✓ Revisione salvata — riapri questa settimana per rivederla</span>)}
                 </div>
               </div>
@@ -1704,7 +1707,7 @@ function ImportPanel({ existingTrades, onImport, pendingNotes, onDeleteNote }) {
         <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, overflow: 'hidden' }}>
           <div style={{ padding: '12px 18px', background: C.card2, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <span style={{ fontSize: 11, color: C.muted, textTransform: 'uppercase', letterSpacing: '.07em', fontWeight: 700 }}>Anteprima ({preview.length} round-trip)</span>
-            <button onClick={doImport} disabled={selectedCount === 0} style={{ padding: '7px 16px', borderRadius: 6, border: 'none', fontWeight: 800, fontSize: 13, background: selectedCount ? C.profit : C.border, color: selectedCount ? '#06120a' : C.muted, cursor: selectedCount ? 'pointer' : 'default' }}>Importa {selectedCount} trade</button>
+            <button onClick={doImport} disabled={selectedCount === 0} style={{ padding: '7px 16px', borderRadius: 6, border: 'none', fontWeight: 800, fontSize: 13, background: selectedCount ? C.profit : C.border, color: selectedCount ? C.onAccent : C.muted, cursor: selectedCount ? 'pointer' : 'default' }}>Importa {selectedCount} trade</button>
           </div>
           <div style={{ maxHeight: 380, overflowY: 'auto' }}>
             <table style={{ width: '100%', fontSize: 13, fontFamily: 'monospace', borderCollapse: 'collapse' }}>
@@ -2195,7 +2198,7 @@ function ExportModal({ title, content, filename, mime, onClose }) {
         <div style={{ fontSize: 13, color: C.muted, marginBottom: 10 }}>Il download automatico può non funzionare in alcuni browser/ambienti — il testo è comunque qui sotto.</div>
         <textarea readOnly value={content} onClick={e => e.target.select()} style={{ flex: 1, minHeight: 340, background: C.card2, border: `1px solid ${C.border}`, color: C.text, borderRadius: 8, padding: 14, fontSize: 13, fontFamily: 'monospace', resize: 'vertical' }} />
         <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>
-          <button onClick={copy} style={{ padding: '9px 18px', borderRadius: 6, border: 'none', background: copied ? C.profit : C.accent, color: '#06121a', fontWeight: 800, fontSize: 13, cursor: 'pointer' }}>{copied ? '✓ Copiato negli appunti' : '📋 Copia tutto'}</button>
+          <button onClick={copy} style={{ padding: '9px 18px', borderRadius: 6, border: 'none', background: copied ? C.profit : C.accent, color: C.onAccent, fontWeight: 800, fontSize: 13, cursor: 'pointer' }}>{copied ? '✓ Copiato negli appunti' : '📋 Copia tutto'}</button>
           <button onClick={download} style={{ padding: '9px 18px', borderRadius: 6, border: `1px solid ${C.border}`, background: C.card2, color: C.text, fontWeight: 700, fontSize: 13, cursor: 'pointer' }}>⬇ {downloadTried ? 'Riprova download' : 'Prova download file'}</button>
         </div>
       </div>
