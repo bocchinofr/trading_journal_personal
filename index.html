@@ -126,6 +126,7 @@ function tradeToRow(t) {
     pnl: t.pnl, locate_cost: t.locateCost || 0, commission: t.commission || 0,
     tags: t.tags || [], notes: t.notes || '', journal: t.journal || {},
     chart_image: t.chartImage || null,
+    size: t.size != null ? t.size : null, pips: t.pips != null ? t.pips : null,
   };
 }
 function rowToTrade(r) {
@@ -135,6 +136,7 @@ function rowToTrade(r) {
     pnl: r.pnl, locateCost: r.locate_cost, commission: r.commission,
     tags: r.tags || [], notes: r.notes, journal: r.journal || {},
     chartImage: r.chart_image,
+    size: r.size, pips: r.pips,
   };
 }
 function noteToRow(n) {
@@ -367,6 +369,7 @@ function buildTripsFromCTrader(rows) {
       time: null,
       sortTime: parts[1] || '99:99',
       extraNote: lots + ' lotti' + (pips !== '' ? ' · ' + pips + ' pip' : ''),
+      pips: pips !== '' ? parseLooseNumber(pips) : null,
     });
   });
   return out;
@@ -398,6 +401,26 @@ function getLocateCost(t) {
 }
 function getCommission(t) {
   return typeof t.commission === 'number' ? t.commission : 0;
+}
+
+function getSize(t) {
+  if (typeof t.size === 'number') return t.size;
+  if (t.notes) { const m = t.notes.match(/([\d.,]+) lotti/); if (m) return parseLooseNumber(m[1]); }
+  return null;
+}
+function getPips(t) {
+  if (typeof t.pips === 'number') return t.pips;
+  if (t.notes) { const m = t.notes.match(/(-?[\d.,]+) pip/); if (m) return parseLooseNumber(m[1]); }
+  return null;
+}
+function fmtSize(t) {
+  const s = getSize(t);
+  if (s == null) return '—';
+  return getTags(t).includes(CT_TAG) ? (Math.round(s * 100) / 100) + ' lot' : Math.round(s).toLocaleString('it-IT') + ' sh';
+}
+function fmtPips(t) {
+  const p = getPips(t);
+  return p == null ? '—' : (p >= 0 ? '+' : '') + p.toFixed(1);
 }
 
 function isWin(t) {
@@ -943,7 +966,7 @@ function ChartImageInput({ value, onChange, small = false, inline = false }) {
 // ════════════════════════════════════════════════════════════
 function AddTradeForm({ onAddTrade, onAddNote, allTags = [], onClose, isDesktop }) {
   const [mode, setMode] = useState('quick');
-  const emptyForm = { date: '', ticker: '', side: 'short', entryPrice: '', exitPrice: '', pnl: '', locateCost: '', commission: '', notes: '', time: '' };
+  const emptyForm = { date: '', ticker: '', side: 'short', entryPrice: '', exitPrice: '', pnl: '', locateCost: '', commission: '', notes: '', time: '', size: '', pips: ''};
   const [f, setF] = useState(emptyForm);
   const [tags, setTags] = useState([]);
   const [journal, setJournal] = useState({});
@@ -960,6 +983,8 @@ function AddTradeForm({ onAddTrade, onAddNote, allTags = [], onClose, isDesktop 
       time: f.time || null, pnl: Number(f.pnl),
       locateCost: f.locateCost ? Number(f.locateCost) : 0,
       commission: f.commission ? Number(f.commission) : 0,
+      size: f.size ? Number(f.size) : null,
+      pips: f.pips !== '' ? Number(f.pips) : null,
       notes: f.notes, journal, chartImage,
     });
     reset();
@@ -1021,7 +1046,9 @@ function AddTradeForm({ onAddTrade, onAddNote, allTags = [], onClose, isDesktop 
             <div><div style={labelStyle}>PnL netto $</div><input type="number" value={f.pnl} onChange={e => setF({ ...f, pnl: e.target.value })} style={inputStyle} /></div>
             <div><div style={labelStyle}>Locate $</div><input type="number" value={f.locateCost} onChange={e => setF({ ...f, locateCost: e.target.value })} style={inputStyle} placeholder="0" /></div>
             <div><div style={labelStyle}>Commissioni $</div><input type="number" value={f.commission} onChange={e => setF({ ...f, commission: e.target.value })} style={inputStyle} placeholder="0" /></div>
-            <div style={{ gridColumn: isDesktop ? 'span 3' : '1 / -1' }}>
+            <div><div style={labelStyle}>Size</div><input type="number" value={f.size} onChange={e => setF({ ...f, size: e.target.value })} style={inputStyle} placeholder="lotti / azioni" /></div>
+            <div><div style={labelStyle}>Pips</div><input type="number" value={f.pips} onChange={e => setF({ ...f, pips: e.target.value })} style={inputStyle} placeholder="solo cTrader" /></div>
+            <div style={{ gridColumn: '1 / -1' }}>
               <div style={labelStyle}>Screenshot</div>
               <ChartImageInput value={chartImage} onChange={setChartImage} inline />
             </div>
@@ -1139,6 +1166,7 @@ function TradeLog({ trades, onUpdate, onDelete, onDuplicate, allTags = [], isDes
         {[...sorted].reverse().map(t => {
           const locate = getLocateCost(t);
           const commission = getCommission(t);
+          const pips = getPips(t);
           const warningTags = getWarningTags(t);
           const hasWarning = warningTags.length > 0;
           return (
@@ -1166,6 +1194,8 @@ function TradeLog({ trades, onUpdate, onDelete, onDuplicate, allTags = [], isDes
                 {isDesktop && (<>
                   <div style={{ width: W_NUM, textAlign: 'right', flexShrink: 0 }}><div style={numLabelStyle}>Entry</div><div style={{ ...numValStyle, color: C.text }}>{t.entryPrice != null ? `$${t.entryPrice.toFixed(2)}` : '—'}</div></div>
                   <div style={{ width: W_NUM, textAlign: 'right', flexShrink: 0 }}><div style={numLabelStyle}>Exit</div><div style={{ ...numValStyle, color: C.text }}>{t.exitPrice != null ? `$${t.exitPrice.toFixed(2)}` : '—'}</div></div>
+                  <div style={{ width: 92, textAlign: 'right', flexShrink: 0 }}><div style={numLabelStyle}>Size</div><div style={{ ...numValStyle, color: C.text }}>{fmtSize(t)}</div></div>
+                  <div style={{ width: 70, textAlign: 'right', flexShrink: 0 }}><div style={numLabelStyle}>Pips</div><div style={{ ...numValStyle, color: pips == null ? C.muted : pips >= 0 ? C.profit : C.loss }}>{fmtPips(t)}</div></div>
                   <div style={{ width: W_NUM, textAlign: 'right', flexShrink: 0 }}><div style={numLabelStyle}>Locate</div><div style={{ ...numValStyle, color: locate > 0 ? C.loss : C.muted }}>{locate > 0 ? `-$${locate.toFixed(2)}` : '$0.00'}</div></div>
                   <div style={{ width: W_NUM, textAlign: 'right', flexShrink: 0 }}><div style={numLabelStyle}>Comm</div><div style={{ ...numValStyle, color: commission > 0 ? C.loss : C.muted }}>{commission > 0 ? `-$${commission.toFixed(2)}` : '$0.00'}</div></div>
                 </>)}
@@ -1177,10 +1207,12 @@ function TradeLog({ trades, onUpdate, onDelete, onDuplicate, allTags = [], isDes
 
               {expandedId === t.id && (
                 <div style={{ padding: isDesktop ? '22px 24px 24px' : '14px 16px 16px', background: C.card2 }}>
-                  {!isDesktop && (t.entryPrice != null || t.exitPrice != null || locate > 0 || commission > 0) && (
+                  {!isDesktop && (t.entryPrice != null || t.exitPrice != null || getSize(t) != null || pips != null || locate > 0 || commission > 0) && (
                     <div style={{ display: 'flex', flexWrap: 'wrap', gap: 16, fontSize: 14, fontFamily: 'monospace', marginBottom: 16, padding: '12px 14px', background: C.card, borderRadius: 8, border: `1px solid ${C.border}` }}>
                       {t.entryPrice != null && <span style={{ color: C.muted }}>Entry <b style={{ color: C.text }}>${t.entryPrice.toFixed(2)}</b></span>}
                       {t.exitPrice != null && <span style={{ color: C.muted }}>Exit <b style={{ color: C.text }}>${t.exitPrice.toFixed(2)}</b></span>}
+                      {getSize(t) != null && <span style={{ color: C.muted }}>Size <b style={{ color: C.text }}>{fmtSize(t)}</b></span>}
+                      {pips != null && <span style={{ color: C.muted }}>Pips <b style={{ color: pips >= 0 ? C.profit : C.loss }}>{fmtPips(t)}</b></span>}
                       <span style={{ color: C.muted }}>Locate <b style={{ color: locate > 0 ? C.loss : C.muted }}>-${locate.toFixed(2)}</b></span>
                       <span style={{ color: C.muted }}>Comm <b style={{ color: commission > 0 ? C.loss : C.muted }}>-${commission.toFixed(2)}</b></span>
                     </div>
@@ -1655,11 +1687,11 @@ function ImportPanel({ existingTrades, onImport, pendingNotes, onDeleteNote }) {
       const parts = [];
       if (t.matchedNote?.notes) parts.push(t.matchedNote.notes);
       if (t.openPosition) parts.push('Posizione aperta a fine file');
-      if (t.extraNote) parts.push(t.extraNote);
       return {
         id: uuid(), date: t.date, ticker: t.ticker, tags: [source === 'ct' ? CT_TAG : TZ_TAG], side: t.side,
         entryPrice: t.entryPrice, exitPrice: t.exitPrice, time: t.time || null, pnl: t.finalPnl,
         locateCost: t.locateCost || 0, commission: t.commission || 0,
+        size: t.qty != null ? t.qty : null, pips: t.pips != null ? t.pips : null,
         notes: parts.join(' · '),
         journal: t.matchedNote?.journal || {},
         chartImage: t.matchedNote?.chartImage || null,
@@ -2041,6 +2073,7 @@ function computeKpis(trades) {
   const avgLoss = losses.length ? Math.abs(losses.reduce((s, t) => s + t.pnl, 0) / losses.length) : 0;
   const pf = avgLoss > 0 && losses.length ? (avgWin * wins.length) / (avgLoss * losses.length) : 0;
   const byDate = [...trades].sort((a, b) => a.date.localeCompare(b.date));
+  const pipsList = trades.map(getPips).filter(p => p != null);
   let cum = 0, peak = 0, maxDD = 0, cw = 0, cl = 0, maxW = 0, maxL = 0;
   byDate.forEach(t => {
     cum += t.pnl;
@@ -2058,6 +2091,7 @@ function computeKpis(trades) {
     best: n ? sorted[n - 1] : null, worst: n ? sorted[0] : null,
     locate: trades.reduce((s, t) => s + getLocateCost(t), 0),
     comm: trades.reduce((s, t) => s + getCommission(t), 0),
+    pips: pipsList.reduce((s, p) => s + p, 0), pipsN: pipsList.length,
   };
 }
 
@@ -2083,13 +2117,20 @@ function buildExportData(label, trades) {
     ['Max loss di fila', k.maxL],
     ['Locate totali $', r2(k.locate)],
     ['Commissioni totali $', r2(k.comm)],
+    ['Pips totali', k.pipsN ? r2(k.pips) : '-'],
+    ['Pips medi/trade', k.pipsN ? r2(k.pips / k.pipsN) : '-'],
   ];
-  const tradeRows = [['Data', 'Ticker', 'Side', 'Ora', 'Entry', 'Exit', 'Locate', 'Comm', 'PnL', 'Tag', 'Perche entrato', 'Cosa successo', 'Note']];
+  const tradeRows = [['Data', 'Ticker', 'Side', 'Ora', 'Entry', 'Exit', 'Size', 'Unità', 'Pips', 'Locate', 'Comm', 'PnL', 'Tag', 'Perche entrato', 'Cosa successo', 'Note']];
   [...trades].sort((a, b) => a.date.localeCompare(b.date)).forEach(t => {
+    const size = getSize(t);
+    const pips = getPips(t);
     tradeRows.push([
       t.date, t.ticker, t.side || '', t.time || '',
       t.entryPrice != null ? r2(t.entryPrice) : '',
       t.exitPrice != null ? r2(t.exitPrice) : '',
+      size != null ? r2(size) : '',
+      size != null ? (getTags(t).includes(CT_TAG) ? 'lotti' : 'azioni') : '',
+      pips != null ? r2(pips) : '',
       r2(getLocateCost(t)), r2(getCommission(t)), r2(t.pnl),
       getTags(t).join(', '),
       (t.journal && t.journal.entryTags ? t.journal.entryTags : []).join(', '),
@@ -2110,8 +2151,7 @@ function downloadExcel(key, data) {
   const ws1 = XLSX.utils.aoa_to_sheet(data.kpiRows);
   ws1['!cols'] = [{ wch: 24 }, { wch: 22 }];
   const ws2 = XLSX.utils.aoa_to_sheet(data.tradeRows);
-  ws2['!cols'] = [{wch:11},{wch:8},{wch:7},{wch:9},{wch:8},{wch:8},{wch:8},{wch:8},{wch:9},{wch:22},{wch:26},{wch:26},{wch:40}];
-  const ws3 = XLSX.utils.aoa_to_sheet(data.tagRows);
+  ws2['!cols'] = [{wch:11},{wch:8},{wch:7},{wch:9},{wch:8},{wch:8},{wch:9},{wch:8},{wch:8},{wch:8},{wch:8},{wch:9},{wch:22},{wch:26},{wch:26},{wch:40}];  const ws3 = XLSX.utils.aoa_to_sheet(data.tagRows);
   ws3['!cols'] = [{ wch: 24 }, { wch: 8 }, { wch: 11 }, { wch: 12 }, { wch: 11 }, { wch: 13 }];
   XLSX.utils.book_append_sheet(wb, ws1, 'KPI');
   XLSX.utils.book_append_sheet(wb, ws2, 'Trade');
@@ -2165,7 +2205,8 @@ function buildAiPrompt(label, trades, reviews, reviewKeys, extra) {
   });
 
   const tradeLines = [...trades].sort((a, b) => a.date.localeCompare(b.date)).map(t =>
-    '  ' + t.date + ' | ' + t.ticker + ' | ' + (t.side || '-') + ' | ' + (getTags(t).join(', ') || '-') + ' | ' +
+    '  ' + t.date + ' | ' + t.ticker + ' | ' + (t.side || '-') + ' | ' + fmtSize(t) + ' | ' + (getPips(t) != null ? fmtPips(t) + ' pip' : '-') + ' | ' +
+    (getTags(t).join(', ') || '-') + ' | ' +
     ((t.journal && t.journal.entryTags) || []).join(', ') + ' | ' + ((t.journal && t.journal.eventTags) || []).join(', ') +
     ' | ' + num(t.pnl) + (isCt(t) ? '€' : '$'));
 
@@ -2190,8 +2231,8 @@ function buildAiPrompt(label, trades, reviews, reviewKeys, extra) {
     'COSA È SUCCESSO', journalLines('eventTags'),
   ];
   if (reviewLines.length) data.push('', 'REVISIONI SETTIMANALI', reviewLines.join('\n'));
-  data.push('', 'DETTAGLIO TRADE (data | strumento | side | tag | perché entrato | cosa è successo | pnl)', tradeLines.join('\n'));
-
+  data.push('', 'DETTAGLIO TRADE (data | strumento | side | size | pips | tag | perché entrato | cosa è successo | pnl)', tradeLines.join('\n'));
+  
   const questions = [
     '1. Per ogni strumento e per ogni tag/conto: dove ho un edge reale (winrate, profit factor, expectancy) e dove no? Tieni separati strumenti e valute.',
     '2. Guardando PERCHÉ SONO ENTRATO: quali setup funzionano e quali vanno evitati o ridotti?',
@@ -2248,6 +2289,7 @@ function ReportPanel({ trades, reviews }) {
   const data = useMemo(() => buildExportData(label, periodTrades), [label, periodTrades]);
   const prompt = useMemo(() => buildAiPrompt(label, periodTrades, reviews || {}, reviewKeys, extra), [label, periodTrades, reviews, extra, mode, selectedKey]);
   const k = data.k;
+  const pnlIdx = data.tradeRows[0].indexOf('PnL');  
 
   const copyPrompt = async () => {
     try { await navigator.clipboard.writeText(prompt); setCopied(true); setTimeout(() => setCopied(false), 1500); } catch (e) { }
@@ -2322,7 +2364,7 @@ function ReportPanel({ trades, reviews }) {
                     <tr key={i} style={{ borderTop: '1px solid ' + C.border }}>
                       {row.map((cell, j) => (
                         <td key={j} style={{ padding: '6px 10px', whiteSpace: 'nowrap', maxWidth: 180, overflow: 'hidden', textOverflow: 'ellipsis',
-                          color: j === 8 ? (cell >= 0 ? C.profit : C.loss) : C.text, fontWeight: j === 1 || j === 8 ? 700 : 400 }}>{cell}</td>
+                          color: j === pnlIdx ? (cell >= 0 ? C.profit : C.loss) : C.text, fontWeight: j === 1 || j === 8 ? 700 : 400 }}>{cell}</td>
                       ))}
                     </tr>
                   ))}
