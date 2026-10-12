@@ -27,6 +27,7 @@
 <script crossorigin src="https://unpkg.com/recharts@2.12.0/umd/Recharts.js"></script>
 <script crossorigin src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 <script src="https://unpkg.com/@supabase/supabase-js@2"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 
 <script>
   Babel.registerPreset('react-classic', {
@@ -2030,138 +2031,317 @@ function StrategyView({ trades }) {
 // ════════════════════════════════════════════════════════════
 // REPORT
 // ════════════════════════════════════════════════════════════
-function buildReport(periodLabel, trades, reviews, reviewKeys) {
-  if (trades.length === 0) return null;
+
+function computeKpis(trades) {
   const n = trades.length;
   const wins = trades.filter(isWin);
   const losses = trades.filter(t => !isWin(t));
   const totalPnl = trades.reduce((s, t) => s + t.pnl, 0);
-  const winrate = wins.length / n;
   const avgWin = wins.length ? wins.reduce((s, t) => s + t.pnl, 0) / wins.length : 0;
   const avgLoss = losses.length ? Math.abs(losses.reduce((s, t) => s + t.pnl, 0) / losses.length) : 0;
   const pf = avgLoss > 0 && losses.length ? (avgWin * wins.length) / (avgLoss * losses.length) : 0;
-  const sorted = [...trades].sort((a, b) => a.pnl - b.pnl);
-  const worst = sorted[0], best = sorted[sorted.length - 1];
-
-  const strategyLines = groupByTags(trades).map(r => `  - ${r.tag}: ${r.n} trade, winrate ${(r.winrate * 100).toFixed(0)}%, PnL ${fmt$(r.totalPnl)}`);
-  const groupByJournalTags = (trades, field) => {
-    const map = {};
-    trades.forEach(t => { (t.journal?.[field] || []).forEach(tag => (map[tag] = map[tag] || []).push(t)); });
-    return Object.entries(map).sort((a, b) => b[1].length - a[1].length).map(([tag, list]) => {
-      const wr = list.filter(isWin).length / list.length;
-      const p = list.reduce((s, t) => s + t.pnl, 0);
-      return `  - ${tag}: ×${list.length}, winrate ${(wr * 100).toFixed(0)}%, PnL ${fmt$(p)}`;
-    });
-  };
-  const entryTagLines = groupByJournalTags(trades, 'entryTags');
-  const eventTagLines = groupByJournalTags(trades, 'eventTags');
-  const reviewLines = reviewKeys.filter(k => reviews[k]).map(k => {
-    const r = reviews[k];
-    return `  - Settimana ${formatWeekRange(k)}: voto ${r.rating ?? '—'}/10${r.notes ? ` — "${r.notes}"` : ''}`;
+  const byDate = [...trades].sort((a, b) => a.date.localeCompare(b.date));
+  let cum = 0, peak = 0, maxDD = 0, cw = 0, cl = 0, maxW = 0, maxL = 0;
+  byDate.forEach(t => {
+    cum += t.pnl;
+    if (cum > peak) peak = cum;
+    if (cum - peak < maxDD) maxDD = cum - peak;
+    if (isWin(t)) { cw++; cl = 0; if (cw > maxW) maxW = cw; }
+    else { cl++; cw = 0; if (cl > maxL) maxL = cl; }
   });
-  const tradeListLines = [...trades].sort((a, b) => a.date.localeCompare(b.date)).map(t => `  ${t.date} · ${t.ticker.padEnd(6)} · ${(getTags(t).join(', ') || '-').padEnd(18)} · ${t.side ?? '-'} · ${fmt$(t.pnl)}`);
+  const sorted = [...trades].sort((a, b) => a.pnl - b.pnl);
+  return {
+    n: n, wins: wins.length, losses: losses.length, totalPnl: totalPnl,
+    winrate: n ? wins.length / n : 0, avgWin: avgWin, avgLoss: avgLoss,
+    expectancy: n ? totalPnl / n : 0, pf: pf, maxDD: Math.abs(maxDD),
+    maxW: maxW, maxL: maxL,
+    best: n ? sorted[n - 1] : null, worst: n ? sorted[0] : null,
+    locate: trades.reduce((s, t) => s + getLocateCost(t), 0),
+    comm: trades.reduce((s, t) => s + getCommission(t), 0),
+  };
+}
 
-  const summary = `
-═══════════════════════════════════════════
-TRADING JOURNAL — REPORT ${periodLabel.toUpperCase()}
-═══════════════════════════════════════════
+function buildExportData(label, trades) {
+  const k = computeKpis(trades);
+  const r2 = v => Math.round(v * 100) / 100;
+  const kpiRows = [
+    ['KPI', 'Valore'],
+    ['Periodo', label],
+    ['Trade totali', k.n],
+    ['Win', k.wins],
+    ['Loss', k.losses],
+    ['Winrate %', r2(k.winrate * 100)],
+    ['P&L totale $', r2(k.totalPnl)],
+    ['Expectancy $/trade', r2(k.expectancy)],
+    ['Profit factor', r2(k.pf)],
+    ['Profit medio $', r2(k.avgWin)],
+    ['Loss medio $', r2(k.avgLoss)],
+    ['Max drawdown $', r2(k.maxDD)],
+    ['Miglior trade', k.best ? k.best.ticker + ' ' + r2(k.best.pnl) : '-'],
+    ['Peggior trade', k.worst ? k.worst.ticker + ' ' + r2(k.worst.pnl) : '-'],
+    ['Max win di fila', k.maxW],
+    ['Max loss di fila', k.maxL],
+    ['Locate totali $', r2(k.locate)],
+    ['Commissioni totali $', r2(k.comm)],
+  ];
+  const tradeRows = [['Data', 'Ticker', 'Side', 'Ora', 'Entry', 'Exit', 'Locate', 'Comm', 'PnL', 'Tag', 'Perche entrato', 'Cosa successo', 'Note']];
+  [...trades].sort((a, b) => a.date.localeCompare(b.date)).forEach(t => {
+    tradeRows.push([
+      t.date, t.ticker, t.side || '', t.time || '',
+      t.entryPrice != null ? r2(t.entryPrice) : '',
+      t.exitPrice != null ? r2(t.exitPrice) : '',
+      r2(getLocateCost(t)), r2(getCommission(t)), r2(t.pnl),
+      getTags(t).join(', '),
+      (t.journal && t.journal.entryTags ? t.journal.entryTags : []).join(', '),
+      (t.journal && t.journal.eventTags ? t.journal.eventTags : []).join(', '),
+      t.notes || '',
+    ]);
+  });
+  const tagRows = [['Tag', 'Trade', 'Winrate %', 'PnL totale', 'PnL medio', 'Profit factor']];
+  groupByTags(trades).forEach(g => {
+    tagRows.push([g.tag, g.n, r2(g.winrate * 100), r2(g.totalPnl), r2(g.avgPnl), r2(g.pf)]);
+  });
+  return { k: k, kpiRows: kpiRows, tradeRows: tradeRows, tagRows: tagRows };
+}
 
-KPI GENERALI
-  Trade totali: ${n}
-  Winrate: ${(winrate * 100).toFixed(1)}%
-  P&L totale: ${fmt$(totalPnl)}
-  Expectancy: ${fmt$(totalPnl / n)}/trade
-  Profit Factor: ${pf.toFixed(2)}
-  Miglior trade: ${best.ticker} ${fmt$(best.pnl)}
-  Peggior trade: ${worst.ticker} ${fmt$(worst.pnl)}
+function downloadExcel(key, data) {
+  if (!window.XLSX) { alert('Libreria Excel non caricata'); return; }
+  const wb = XLSX.utils.book_new();
+  const ws1 = XLSX.utils.aoa_to_sheet(data.kpiRows);
+  ws1['!cols'] = [{ wch: 24 }, { wch: 22 }];
+  const ws2 = XLSX.utils.aoa_to_sheet(data.tradeRows);
+  ws2['!cols'] = [{wch:11},{wch:8},{wch:7},{wch:9},{wch:8},{wch:8},{wch:8},{wch:8},{wch:9},{wch:22},{wch:26},{wch:26},{wch:40}];
+  const ws3 = XLSX.utils.aoa_to_sheet(data.tagRows);
+  ws3['!cols'] = [{ wch: 24 }, { wch: 8 }, { wch: 11 }, { wch: 12 }, { wch: 11 }, { wch: 13 }];
+  XLSX.utils.book_append_sheet(wb, ws1, 'KPI');
+  XLSX.utils.book_append_sheet(wb, ws2, 'Trade');
+  XLSX.utils.book_append_sheet(wb, ws3, 'Per Tag');
+  XLSX.writeFile(wb, 'trading-journal-' + key + '.xlsx');
+}
 
-PER STRATEGIA
-${strategyLines.join('\n') || '  (nessun dato)'}
+function buildAiPrompt(label, trades, reviews, reviewKeys, extra) {
+  if (!trades.length) return '';
+  const num = v => (v >= 0 ? '+' : '') + v.toFixed(0);
+  const pct = v => (v * 100).toFixed(0) + '%';
+  const k = computeKpis(trades);
+  const isCt = t => getTags(t).includes(CT_TAG);
+  const ctN = trades.filter(isCt).length;
+  const mixed = ctN > 0 && ctN < trades.length;
+  const cur = ctN === trades.length ? '€' : '$';
 
-PERCHÉ SEI ENTRATO (dal journaling)
-${entryTagLines.join('\n') || '  (nessun tag di entrata registrato)'}
+  let context;
+  if (ctN === 0) context = 'Opero short selling su small cap USA in gap-up (conto TradeZero, importi in $).';
+  else if (ctN === trades.length) context = 'Opero strategie su CFD indici e oro tramite cTrader (importi in €).';
+  else context = 'Opero due conti: short selling su small cap USA in gap-up (TradeZero, $) e strategie su CFD indici e oro (cTrader, €). I trade con tag "' + CT_TAG + '" sono in €, tutti gli altri in $: analizza i due conti separatamente e non sommare le valute.';
 
-COSA È SUCCESSO (dal journaling)
-${eventTagLines.join('\n') || '  (nessun tag evento registrato)'}
-${reviewLines.length ? `\nREVISIONI SETTIMANALI\n${reviewLines.join('\n')}` : ''}
+  const rowLine = (name, r) => '  - ' + name + ': ' + r.n + ' trade, WR ' + pct(r.winrate) + ', PnL ' + num(r.totalPnl);
+  const block = rows => rows.filter(r => r.n > 0).map(r => rowLine(r.key, r)).join('\n') || '  (nessun dato)';
 
-DETTAGLIO TRADE
-${tradeListLines.join('\n')}
-`.trim();
+  const tickerMap = {};
+  trades.forEach(t => { (tickerMap[t.ticker] = tickerMap[t.ticker] || []).push(t); });
+  const tickerLines = Object.entries(tickerMap)
+    .map(([tk, list]) => ({ tk: tk, n: list.length, pnl: list.reduce((s, t) => s + t.pnl, 0), wr: list.filter(isWin).length / list.length }))
+    .sort((a, b) => b.n - a.n).slice(0, 12)
+    .map(r => '  - ' + r.tk + ': ' + r.n + ' trade, WR ' + pct(r.wr) + ', PnL ' + num(r.pnl));
 
-  const prompt = `
-Sono un trader retail che opera short-selling su small cap USA gap-up. Analizza i miei dati di trading di ${periodLabel} qui sotto e aiutami a capire:
+  const tagLines = groupByTags(trades).map(r => '  - ' + r.tag + ': ' + r.n + ' trade, WR ' + pct(r.winrate) + ', PnL ' + num(r.totalPnl) + ', PF ' + r.pf.toFixed(2));
 
-1. Guardando PERCHÉ SEI ENTRATO, quali setup/motivazioni di ingresso funzionano meglio e quali andrebbero evitati (winrate e PnL per tag)?
-2. Ci sono pattern ricorrenti nei trade in perdita legati a un tag di entrata specifico?
-3. Guardando COSA È SUCCESSO, quale singolo problema di esecuzione mi costa di più (frequenza × PnL negativo)?
-4. Quale strategia/tag sta performando meglio/peggio?
-5. Dammi 2-3 azioni concrete da applicare nel prossimo periodo.
+  const journalLines = field => {
+    const map = {};
+    trades.forEach(t => { ((t.journal && t.journal[field]) || []).forEach(tag => { (map[tag] = map[tag] || []).push(t); }); });
+    const out = Object.entries(map).sort((a, b) => b[1].length - a[1].length).map(([tag, list]) =>
+      '  - ' + tag + ': x' + list.length + ', WR ' + pct(list.filter(isWin).length / list.length) + ', PnL ' + num(list.reduce((s, t) => s + t.pnl, 0)));
+    return out.join('\n') || '  (nessun dato)';
+  };
 
-Ecco i dati:
+  const bySide = groupStats(trades, t => t.side === 'short' ? 'Short' : t.side === 'long' ? 'Long' : null);
+  const byDay = groupStats(trades, t => WEEKDAY_NAMES[(new Date(t.date + 'T00:00:00').getDay() + 6) % 7], WEEKDAY_NAMES);
+  const withTime = trades.filter(t => t.time);
+  const byTime = groupStats(withTime, t => timeBucket(t.time), TIME_ORDER);
 
-${summary}
-`.trim();
-  return { summary, prompt };
+  const reviewLines = reviewKeys.filter(key => reviews[key]).map(key => {
+    const r = reviews[key];
+    return '  - Settimana ' + formatWeekRange(key) + ': voto ' + (r.rating != null ? r.rating : '-') + '/10' + (r.notes ? ' — "' + r.notes + '"' : '');
+  });
+
+  const tradeLines = [...trades].sort((a, b) => a.date.localeCompare(b.date)).map(t =>
+    '  ' + t.date + ' | ' + t.ticker + ' | ' + (t.side || '-') + ' | ' + (getTags(t).join(', ') || '-') + ' | ' +
+    ((t.journal && t.journal.entryTags) || []).join(', ') + ' | ' + ((t.journal && t.journal.eventTags) || []).join(', ') +
+    ' | ' + num(t.pnl) + (isCt(t) ? '€' : '$'));
+
+  const data = [
+    'KPI GENERALI' + (mixed ? ' (valute miste: totali indicativi)' : ' (' + cur + ')'),
+    '  Trade: ' + k.n + ' | Winrate: ' + pct(k.winrate) + ' | PnL: ' + num(k.totalPnl) + ' | Expectancy: ' + num(k.expectancy) + '/trade',
+    '  Profit factor: ' + k.pf.toFixed(2) + ' | Profit medio: ' + num(k.avgWin) + ' | Loss medio: -' + k.avgLoss.toFixed(0),
+    '  Max drawdown: -' + k.maxDD.toFixed(0) + ' | Max win di fila: ' + k.maxW + ' | Max loss di fila: ' + k.maxL,
+    '',
+    'PER STRUMENTO (i più negoziati)', tickerLines.join('\n') || '  (nessun dato)',
+    '',
+    'PER STRATEGIA / TAG / CONTO', tagLines.join('\n') || '  (nessun dato)',
+    '',
+    'LONG vs SHORT', block(bySide),
+    '',
+    'PER GIORNO', block(byDay),
+    '',
+    'PER FASCIA ORARIA (' + withTime.length + ' trade con orario)', block(byTime),
+    '',
+    'PERCHÉ SONO ENTRATO', journalLines('entryTags'),
+    '',
+    'COSA È SUCCESSO', journalLines('eventTags'),
+  ];
+  if (reviewLines.length) data.push('', 'REVISIONI SETTIMANALI', reviewLines.join('\n'));
+  data.push('', 'DETTAGLIO TRADE (data | strumento | side | tag | perché entrato | cosa è successo | pnl)', tradeLines.join('\n'));
+
+  const questions = [
+    '1. Per ogni strumento e per ogni tag/conto: dove ho un edge reale (winrate, profit factor, expectancy) e dove no? Tieni separati strumenti e valute.',
+    '2. Guardando PERCHÉ SONO ENTRATO: quali setup funzionano e quali vanno evitati o ridotti?',
+    '3. Guardando COSA È SUCCESSO: quale errore di esecuzione mi costa di più (frequenza x PnL negativo) e in quale strumento?',
+    '4. Ci sono pattern per giorno, fascia oraria o direzione (long/short) legati ai trade in perdita?',
+    '5. Gestione del rischio: il rapporto tra loss medio e profit medio, il drawdown e le serie di loss sono coerenti con la strategia? Segnala eventuali anomalie di size.',
+    '6. Dammi 2-3 azioni concrete per il prossimo periodo e una regola da testare, indicando quali dati servirebbero per verificarla.',
+    'Se il campione di un gruppo è sotto i 30 trade, dillo chiaramente e non trarre conclusioni forti.',
+  ];
+
+  return [
+    'Sono un trader retail. ' + context,
+    'Analizza i miei dati di trading del periodo "' + label + '" e rispondi in modo diretto, con numeri.',
+    extra && extra.trim() ? '\nContesto aggiuntivo: ' + extra.trim() : '',
+    '\nDOMANDE',
+    questions.join('\n'),
+    '\nDATI',
+    data.join('\n'),
+  ].join('\n').trim();
 }
 
 function ReportPanel({ trades, reviews }) {
-  const [mode, setMode] = useState('week');
+  const [mode, setMode] = useState('month');
   const [selectedKey, setSelectedKey] = useState('');
-  const [view, setView] = useState('summary');
+  const [view, setView] = useState('table');
+  const [extra, setExtra] = useState('');
   const [copied, setCopied] = useState(false);
 
-  const weekKeys = useMemo(() => { const s = new Set(trades.map(t => getMonday(t.date))); return Array.from(s).sort().reverse(); }, [trades]);
-  const monthKeys = useMemo(() => { const s = new Set(trades.map(t => t.date.slice(0, 7))); return Array.from(s).sort().reverse(); }, [trades]);
-  const keys = mode === 'week' ? weekKeys : monthKeys;
+  const weekKeys = useMemo(() => Array.from(new Set(trades.map(t => getMonday(t.date)))).sort().reverse(), [trades]);
+  const monthKeys = useMemo(() => Array.from(new Set(trades.map(t => t.date.slice(0, 7)))).sort().reverse(), [trades]);
+  const keys = mode === 'week' ? weekKeys : mode === 'month' ? monthKeys : [];
 
-  useEffect(() => { if (keys.length && !keys.includes(selectedKey)) setSelectedKey(keys[0]); }, [mode, keys.join(',')]);
+  useEffect(() => {
+    if (mode !== 'all' && keys.length && !keys.includes(selectedKey)) setSelectedKey(keys[0]);
+  }, [mode, keys.join(',')]);
 
   const periodTrades = useMemo(() => {
+    if (mode === 'all') return trades;
     if (!selectedKey) return [];
-    if (mode === 'week') { const monday = selectedKey; const sunday = addDays(monday, 6); return trades.filter(t => t.date >= monday && t.date <= sunday); }
+    if (mode === 'week') { const end = addDays(selectedKey, 6); return trades.filter(t => t.date >= selectedKey && t.date <= end); }
     return trades.filter(t => t.date.startsWith(selectedKey));
   }, [trades, mode, selectedKey]);
 
-  const reviewKeys = mode === 'week' ? [selectedKey] : weekKeys.filter(wk => wk.startsWith(selectedKey.slice(0, 7)) || wk.slice(0, 7) === selectedKey);
-  const periodLabel = mode === 'week' ? (selectedKey ? formatWeekRange(selectedKey) : '') : (selectedKey ? `${monthNames[Number(selectedKey.slice(5, 7)) - 1]} ${selectedKey.slice(0, 4)}` : '');
-  const report = useMemo(() => buildReport(periodLabel, periodTrades, reviews, reviewKeys), [periodLabel, periodTrades, reviews]);
+  const label = mode === 'all' ? 'Tutto il periodo'
+    : !selectedKey ? ''
+    : mode === 'week' ? formatWeekRange(selectedKey)
+    : monthNames[Number(selectedKey.slice(5, 7)) - 1] + ' ' + selectedKey.slice(0, 4);
+  const fileKey = mode === 'all' ? 'tutto' : selectedKey;
 
-  const copyText = async text => { try { await navigator.clipboard.writeText(text); setCopied(true); setTimeout(() => setCopied(false), 1500); } catch { } };
-  const downloadText = text => { triggerDownload(text, `report-${selectedKey || 'export'}.txt`, 'text/plain'); };
+  const reviewKeys = mode === 'week' ? [selectedKey]
+    : mode === 'month' ? weekKeys.filter(wk => wk.slice(0, 7) === selectedKey || addDays(wk, 6).slice(0, 7) === selectedKey)
+    : weekKeys;
 
-  if (trades.length === 0) return (<div style={{ background: C.card, border: `1px dashed ${C.border}`, borderRadius: 12, padding: 30, textAlign: 'center', color: C.muted, fontSize: 14 }}>Nessun trade disponibile per generare un report</div>);
+  const data = useMemo(() => buildExportData(label, periodTrades), [label, periodTrades]);
+  const prompt = useMemo(() => buildAiPrompt(label, periodTrades, reviews || {}, reviewKeys, extra), [label, periodTrades, reviews, extra, mode, selectedKey]);
+  const k = data.k;
+
+  const copyPrompt = async () => {
+    try { await navigator.clipboard.writeText(prompt); setCopied(true); setTimeout(() => setCopied(false), 1500); } catch (e) { }
+  };
+
+  if (trades.length === 0) return (
+    <div style={{ background: C.card, border: '1px dashed ' + C.border, borderRadius: 12, padding: 30, textAlign: 'center', color: C.muted, fontSize: 14 }}>
+      Nessun trade disponibile per l'export
+    </div>
+  );
+
+  const btn = active => ({ padding: '8px 18px', borderRadius: 6, cursor: 'pointer', fontSize: 14, fontWeight: 700, border: '1px solid ' + (active ? C.accent : C.border), background: active ? C.accent + '22' : C.card2, color: active ? C.accent : C.muted });
+  const kpiCards = [
+    ['Trade', String(k.n), C.accent],
+    ['Winrate', (k.winrate * 100).toFixed(0) + '%', k.winrate >= 0.5 ? C.profit : C.loss],
+    ['P&L', fmt$(k.totalPnl), k.totalPnl >= 0 ? C.profit : C.loss],
+    ['Expectancy', fmt$(k.expectancy), C.text],
+    ['Profit factor', k.pf.toFixed(2), k.pf >= 1.5 ? C.profit : C.loss],
+    ['Max DD', '-' + k.maxDD.toFixed(0) + '$', C.loss],
+  ];
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
       <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
-        <div style={{ display: 'flex', gap: 6 }}>
-          {[['week', 'Settimana'], ['month', 'Mese']].map(([v, l]) => (
-            <button key={v} onClick={() => setMode(v)} style={{ padding: '8px 18px', borderRadius: 6, cursor: 'pointer', fontSize: 14, fontWeight: 700, border: `1px solid ${mode === v ? C.accent : C.border}`, background: mode === v ? `${C.accent}15` : C.card2, color: mode === v ? C.accent : C.muted }}>{l}</button>
-          ))}
-        </div>
-        <select value={selectedKey} onChange={e => setSelectedKey(e.target.value)} style={{ background: C.card2, border: `1px solid ${C.border}`, color: C.text, borderRadius: 6, padding: '8px 14px', fontSize: 14, width: 240, fontFamily: 'inherit' }}>
-          {keys.map(k => (<option key={k} value={k}>{mode === 'week' ? formatWeekRange(k) : `${monthNames[Number(k.slice(5,7)) - 1]} ${k.slice(0,4)}`}</option>))}
-        </select>
-        <span style={{ fontSize: 13, color: C.muted }}>{periodTrades.length} trade nel periodo</span>
+        {[['week', 'Settimana'], ['month', 'Mese'], ['all', 'Tutto']].map(([v, l]) => (
+          <button key={v} onClick={() => setMode(v)} style={btn(mode === v)}>{l}</button>
+        ))}
+        {mode !== 'all' && (
+          <select value={selectedKey} onChange={e => setSelectedKey(e.target.value)} style={{ background: C.card2, border: '1px solid ' + C.border, color: C.text, borderRadius: 6, padding: '8px 14px', fontSize: 14, width: 220 }}>
+            {keys.map(key => (
+              <option key={key} value={key}>{mode === 'week' ? formatWeekRange(key) : monthNames[Number(key.slice(5, 7)) - 1] + ' ' + key.slice(0, 4)}</option>
+            ))}
+          </select>
+        )}
+        <span style={{ fontSize: 13, color: C.muted }}>{periodTrades.length} trade</span>
+        <div style={{ flex: 1 }} />
+        <button onClick={() => downloadExcel(fileKey, data)} disabled={!periodTrades.length}
+          style={{ padding: '9px 20px', borderRadius: 6, border: 'none', background: C.profit, color: '#06120a', fontWeight: 800, fontSize: 14, cursor: 'pointer' }}>
+          ⬇ Scarica Excel
+        </button>
       </div>
 
-      {!report ? (
-        <div style={{ background: C.card, border: `1px dashed ${C.border}`, borderRadius: 12, padding: 30, textAlign: 'center', color: C.muted, fontSize: 14 }}>Nessun trade in questo periodo</div>
-      ) : (
-        <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, overflow: 'hidden' }}>
-          <div style={{ padding: '12px 18px', background: C.card2, display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
-            <div style={{ display: 'flex', gap: 6 }}>
-              {[['summary', '📊 Riepilogo'], ['prompt', '🤖 Prompt per AI']].map(([v, l]) => (
-                <button key={v} onClick={() => setView(v)} style={{ padding: '7px 16px', borderRadius: 6, cursor: 'pointer', fontSize: 13, fontWeight: 700, border: `1px solid ${view === v ? C.accent : C.border}`, background: view === v ? `${C.accent}15` : C.card, color: view === v ? C.accent : C.muted }}>{l}</button>
-              ))}
+      <div style={{ display: 'flex', gap: 6 }}>
+        {[['table', '📊 Tabella'], ['prompt', '🤖 Prompt AI']].map(([v, l]) => (
+          <button key={v} onClick={() => setView(v)} style={btn(view === v)}>{l}</button>
+        ))}
+      </div>
+
+      {view === 'table' ? (
+        <>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: 10 }}>
+            {kpiCards.map(([l, v, c]) => (
+              <div key={l} style={{ background: C.card, border: '1px solid ' + C.border, borderRadius: 10, padding: '10px 12px' }}>
+                <div style={{ fontSize: 10, color: C.muted, textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: 4 }}>{l}</div>
+                <div style={{ fontSize: 18, fontWeight: 800, color: c, fontFamily: 'monospace' }}>{v}</div>
+              </div>
+            ))}
+          </div>
+          <div style={{ background: C.card, border: '1px solid ' + C.border, borderRadius: 12, overflow: 'hidden' }}>
+            <div style={{ padding: '10px 16px', background: C.card2, fontSize: 12, color: C.muted, textTransform: 'uppercase', letterSpacing: '.07em', fontWeight: 700 }}>
+              Anteprima foglio "Trade" ({periodTrades.length})
             </div>
-            <div style={{ display: 'flex', gap: 6 }}>
-              <button onClick={() => copyText(view === 'summary' ? report.summary : report.prompt)} style={{ padding: '7px 16px', borderRadius: 6, border: `1px solid ${C.border}`, background: C.card, color: copied ? C.profit : C.text, fontSize: 13, fontWeight: 700, cursor: 'pointer' }}>{copied ? '✓ Copiato' : '📋 Copia'}</button>
-              <button onClick={() => downloadText(view === 'summary' ? report.summary : report.prompt)} style={{ padding: '7px 16px', borderRadius: 6, border: `1px solid ${C.border}`, background: C.card, color: C.text, fontSize: 13, fontWeight: 700, cursor: 'pointer' }}>⬇ .txt</button>
+            <div style={{ maxHeight: 420, overflow: 'auto' }}>
+              <table style={{ width: '100%', fontSize: 12, fontFamily: 'monospace', borderCollapse: 'collapse' }}>
+                <thead style={{ position: 'sticky', top: 0, background: C.card2 }}>
+                  <tr>{data.tradeRows[0].map(h => (
+                    <th key={h} style={{ padding: '8px 10px', textAlign: 'left', fontSize: 10, color: C.muted, textTransform: 'uppercase', whiteSpace: 'nowrap' }}>{h}</th>
+                  ))}</tr>
+                </thead>
+                <tbody>
+                  {data.tradeRows.slice(1).map((row, i) => (
+                    <tr key={i} style={{ borderTop: '1px solid ' + C.border }}>
+                      {row.map((cell, j) => (
+                        <td key={j} style={{ padding: '6px 10px', whiteSpace: 'nowrap', maxWidth: 180, overflow: 'hidden', textOverflow: 'ellipsis',
+                          color: j === 8 ? (cell >= 0 ? C.profit : C.loss) : C.text, fontWeight: j === 1 || j === 8 ? 700 : 400 }}>{cell}</td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
           </div>
-          <pre style={{ margin: 0, padding: 20, fontSize: 13, fontFamily: 'monospace', color: C.text, whiteSpace: 'pre-wrap', maxHeight: 520, overflowY: 'auto', lineHeight: 1.55 }}>{view === 'summary' ? report.summary : report.prompt}</pre>
+        </>
+      ) : (
+        <div style={{ background: C.card, border: '1px solid ' + C.border, borderRadius: 12, overflow: 'hidden' }}>
+          <div style={{ padding: '12px 16px', background: C.card2, display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+            <input type="text" value={extra} onChange={e => setExtra(e.target.value)}
+              placeholder="Contesto extra (opzionale): es. 'ho cambiato lo stop da lunedì'"
+              style={{ flex: 1, minWidth: 220, background: C.card, border: '1px solid ' + C.border, color: C.text, borderRadius: 6, padding: '8px 12px', fontSize: 13, fontFamily: 'inherit' }} />
+            <button onClick={copyPrompt} style={{ padding: '8px 18px', borderRadius: 6, border: 'none', background: copied ? C.profit : C.accent, color: C.onAccent, fontWeight: 800, fontSize: 13, cursor: 'pointer' }}>
+              {copied ? '✓ Copiato' : '📋 Copia prompt'}
+            </button>
+          </div>
+          <pre style={{ margin: 0, padding: 20, fontSize: 12, fontFamily: 'monospace', color: C.text, whiteSpace: 'pre-wrap', maxHeight: 520, overflowY: 'auto', lineHeight: 1.55 }}>{prompt}</pre>
         </div>
       )}
     </div>
@@ -2462,7 +2642,7 @@ function TradingJournal() {
           {tab === 'log' && (<TradeLog trades={filteredTrades} onUpdate={updateTrade} onDelete={deleteTrade} onDuplicate={duplicateTrade} allTags={allTags} isDesktop={isDesktop} />)}
           {tab === 'review' && (<WeeklyReview trades={filteredTrades} reviews={reviews} onSaveReview={saveReview} isDesktop={isDesktop} />)}
           {tab === 'strategy' && (<StrategyView trades={filteredTrades} />)}
-          {tab === 'report' && (<ReportPanel trades={trades} reviews={reviews} />)}
+          {tab === 'report' && (<ReportPanel trades={filteredTrades} reviews={reviews} />)}
           {tab === 'import' && (<ImportPanel existingTrades={trades} onImport={importTrades} pendingNotes={pendingNotes} onDeleteNote={deletePendingNote} />)}
 
         </div>
