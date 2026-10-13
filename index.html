@@ -344,11 +344,29 @@ function isCTraderCSV(rows) {
   const keys = Object.keys(rows[0]).map(k => k.replace(/^\uFEFF/, '').toLowerCase());
   return keys.some(k => k.startsWith('simbolo')) && keys.some(k => k.startsWith('orario di chiusura'));
 }
+
+function ctDate(s) {
+  const m = String(s || '').match(/(\d{2})\/(\d{2})\/(\d{4}) (\d{2}):(\d{2}):(\d{2})/);
+  return m ? Date.UTC(+m[3], +m[2] - 1, +m[1], +m[4], +m[5], +m[6]) : null;
+}
+
+function ctTime(s) {
+  const m = String(s || '').match(/ (\d{2}):(\d{2}):(\d{2})/);
+  return m ? m[1] + ':' + m[2] + ':' + m[3] : null;
+}
+function fmtDur(sec) {
+  if (sec == null) return '';
+  if (sec < 60) return sec + 's';
+  const m = Math.floor(sec / 60);
+  return m < 60 ? m + 'm' : Math.floor(m / 60) + 'h' + String(m % 60).padStart(2, '0');
+}
+
 function buildTripsFromCTrader(rows) {
   const out = [];
   rows.forEach(r => {
     const sym = ctCol(r, 'Simbolo');
     const when = ctCol(r, 'Orario di chiusura');
+    const openStr = ctCol(r, 'Orario di apertura');
     if (!sym || !when) return;
     const parts = when.trim().split(' ');
     const dmy = (parts[0] || '').split('/');
@@ -358,6 +376,7 @@ function buildTripsFromCTrader(rows) {
     const side = (dir.startsWith('buy') || dir.startsWith('acq')) ? 'long' : 'short';
     const lots = parseLooseNumber(ctCol(r, 'Quantit'));
     const pips = ctCol(r, 'Pip');
+    const t0 = ctDate(openStr), t1 = ctDate(when);
     out.push({
       ticker: sym.trim().toUpperCase(),
       date, side,
@@ -365,10 +384,12 @@ function buildTripsFromCTrader(rows) {
       exitPrice: parseLooseNumber(ctCol(r, 'Prezzo di chiusura')),
       qty: lots,
       pnlFromProceeds: parseLooseNumber(ctCol(r, 'Netto')),
-      commission: 0,
-      time: null,
-      sortTime: parts[1] || '99:99',
-      extraNote: lots + ' lotti' + (pips !== '' ? ' · ' + pips + ' pip' : ''),
+      commission: Math.abs(parseLooseNumber(ctCol(r, 'Commissione'))),
+      swap: -parseLooseNumber(ctCol(r, 'Swap')),   // costo positivo, credito negativo
+      time: ctTime(openStr),
+      exitTime: ctTime(when),
+      durationSec: (t0 != null && t1 != null) ? Math.round((t1 - t0) / 1000) : null,
+      sortTime: (openStr.split(' ')[1]) || '99:99',
       pips: pips !== '' ? parseLooseNumber(pips) : null,
     });
   });
@@ -1667,8 +1688,8 @@ function ImportPanel({ existingTrades, onImport, pendingNotes, onDeleteNote }) {
       sortedIdxs.forEach((idx, i) => { if (notes[i]) matchByIdx[idx] = notes[i]; });
     });
     const withLocate = trips.map((t, i) => {
-      const locateCost = source === 'ct' ? 0 : (locateMap[`${t.date}__${t.ticker}`] || 0);
-      const finalPnl = t.pnlFromProceeds - locateCost;
+      const locateCost = source === 'ct' ? (t.swap || 0) : (locateMap[`${t.date}__${t.ticker}`] || 0);
+      const finalPnl = source === 'ct' ? t.pnlFromProceeds : t.pnlFromProceeds - locateCost;
       const isDup = existingTrades.some(e => e.date === t.date && e.ticker === t.ticker && Math.abs((e.entryPrice ?? -999) - (t.entryPrice ?? -998)) < 0.005 && (source !== 'ct' || Math.abs((e.exitPrice ?? -999) - (t.exitPrice ?? -998)) < 0.005));
       const matchedNote = matchByIdx[i] || null;
       return { ...t, locateCost, finalPnl, isDup, matchedNoteId: matchedNote?.id ?? null, matchedNote };
@@ -1693,7 +1714,7 @@ function ImportPanel({ existingTrades, onImport, pendingNotes, onDeleteNote }) {
         locateCost: t.locateCost || 0, commission: t.commission || 0,
         size: t.qty != null ? t.qty : null, pips: t.pips != null ? t.pips : null,
         notes: parts.join(' · '),
-        journal: t.matchedNote?.journal || {},
+        journal: { ...(t.matchedNote?.journal || {}), ...(source === 'ct' ? { exitTime: t.exitTime, durationSec: t.durationSec } : {}) },
         chartImage: t.matchedNote?.chartImage || null,
       };
     });
@@ -1745,19 +1766,23 @@ function ImportPanel({ existingTrades, onImport, pendingNotes, onDeleteNote }) {
           <div style={{ maxHeight: 380, overflowY: 'auto' }}>
             <table style={{ width: '100%', fontSize: 13, fontFamily: 'monospace', borderCollapse: 'collapse' }}>
               <thead style={{ position: 'sticky', top: 0, background: C.card2 }}>
-                <tr>{['','Data','Ticker','Side','Entry','Exit','Qty','Locate','PnL netto','Nota',''].map(h => (<th key={h} style={{ padding: '8px 10px', textAlign: 'left', fontSize: 11, color: C.muted, textTransform: 'uppercase' }}>{h}</th>))}</tr>
+                <tr>{['','Data','Ora','Ticker','Side','Entry','Exit','Qty', source === 'ct' ? 'Swap' : 'Locate','Comm','PnL netto','Nota',''].map(h => (<th key={h} style={{ padding: '8px 10px', textAlign: 'left', fontSize: 11, color: C.muted, textTransform: 'uppercase' }}>{h}</th>))}</tr>
               </thead>
               <tbody>
                 {preview.map((t, i) => (
                   <tr key={i} style={{ borderTop: `1px solid ${C.border}`, background: t.isDup ? 'rgba(232,196,104,0.06)' : 'transparent' }}>
                     <td style={{ padding: '7px 10px' }}><input type="checkbox" checked={!!selected[i]} onChange={() => toggleSel(i)} /></td>
                     <td style={{ padding: '7px 10px', color: C.muted }}>{t.date}</td>
+                    <td style={{ padding: '7px 10px', color: C.muted, whiteSpace: 'nowrap' }}>
+                      {t.time ? t.time.slice(0,5) : '—'}{t.exitTime ? ' → ' + t.exitTime.slice(0,5) : ''}{t.durationSec != null ? ' · ' + fmtDur(t.durationSec) : ''}
+                    </td>
                     <td style={{ padding: '7px 10px', color: C.text, fontWeight: 700 }}>{t.ticker}</td>
                     <td style={{ padding: '7px 10px', color: t.side === 'short' ? C.loss : C.profit }}>{t.side}</td>
                     <td style={{ padding: '7px 10px' }}>{t.entryPrice?.toFixed(3) ?? '-'}</td>
                     <td style={{ padding: '7px 10px' }}>{t.exitPrice?.toFixed(3) ?? '-'}</td>
                     <td style={{ padding: '7px 10px', color: C.muted }}>{t.qty}</td>
                     <td style={{ padding: '7px 10px', color: t.locateCost ? C.loss : C.muted }}>{t.locateCost ? `-${t.locateCost.toFixed(2)}` : '—'}</td>
+                    <td style={{ padding: '7px 10px', color: t.commission ? C.loss : C.muted }}>{t.commission ? `-${t.commission.toFixed(2)}` : '—'}</td>
                     <td style={{ padding: '7px 10px', fontWeight: 700, color: t.finalPnl >= 0 ? C.profit : C.loss }}>{fmt$(t.finalPnl)}</td>
                     <td style={{ padding: '7px 10px', fontSize: 12, maxWidth: 170 }}>
                       <select value={t.matchedNoteId || ''}
