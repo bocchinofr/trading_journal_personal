@@ -192,7 +192,7 @@ const dataStore = {
   async saveTheme(theme) { localStorage.setItem('trading-journal:theme', theme); },
 };
 
-const fmt$ = v => (v >= 0 ? '+' : '') + v.toFixed(0) + CUR;
+const fmt$ = v => (v >= 0 ? '+' : '') + v.toFixed(2) + CUR;
 const monthNames = ['Gen','Feb','Mar','Apr','Mag','Giu','Lug','Ago','Set','Ott','Nov','Dic'];
 const dayLabels = ['L','M','M','G','V','S','D'];
 
