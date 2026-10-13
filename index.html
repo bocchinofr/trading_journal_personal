@@ -443,7 +443,12 @@ function fmtPips(t) {
   const p = getPips(t);
   return p == null ? '—' : (p >= 0 ? '+' : '') + p.toFixed(1);
 }
-
+function fmtTimes(t) {
+  if (!t.time) return '—';
+  const exit = t.journal?.exitTime;
+  const d = t.journal?.durationSec;
+  return t.time.slice(0, 5) + (exit ? '→' + exit.slice(0, 5) : '') + (typeof d === 'number' ? ' · ' + fmtDur(d) : '');
+}
 function isWin(t) {
   return (t.pnl + getCommission(t)) > 0;
 }
@@ -1213,11 +1218,12 @@ function TradeLog({ trades, onUpdate, onDelete, onDuplicate, allTags = [], isDes
                   {getTags(t).length > (isDesktop ? 2 : 1) && <span style={{ fontSize: 11, color: C.muted }}>+{getTags(t).length - (isDesktop ? 2 : 1)}</span>}
                 </div>
                 {isDesktop && (<>
+                  <div style={{ width: 150, textAlign: 'right', flexShrink: 0 }}><div style={numLabelStyle}>Ora · Durata</div><div style={{ ...numValStyle, fontSize: 13, color: C.text }}>{fmtTimes(t)}</div></div>
                   <div style={{ width: W_NUM, textAlign: 'right', flexShrink: 0 }}><div style={numLabelStyle}>Entry</div><div style={{ ...numValStyle, color: C.text }}>{t.entryPrice != null ? `$${t.entryPrice.toFixed(2)}` : '—'}</div></div>
                   <div style={{ width: W_NUM, textAlign: 'right', flexShrink: 0 }}><div style={numLabelStyle}>Exit</div><div style={{ ...numValStyle, color: C.text }}>{t.exitPrice != null ? `$${t.exitPrice.toFixed(2)}` : '—'}</div></div>
                   <div style={{ width: 92, textAlign: 'right', flexShrink: 0 }}><div style={numLabelStyle}>Size</div><div style={{ ...numValStyle, color: C.text }}>{fmtSize(t)}</div></div>
                   <div style={{ width: 70, textAlign: 'right', flexShrink: 0 }}><div style={numLabelStyle}>Pips</div><div style={{ ...numValStyle, color: pips == null ? C.muted : pips >= 0 ? C.profit : C.loss }}>{fmtPips(t)}</div></div>
-                  <div style={{ width: W_NUM, textAlign: 'right', flexShrink: 0 }}><div style={numLabelStyle}>Locate</div><div style={{ ...numValStyle, color: locate > 0 ? C.loss : C.muted }}>{locate > 0 ? `-$${locate.toFixed(2)}` : '$0.00'}</div></div>
+                  <div style={{ width: W_NUM, textAlign: 'right', flexShrink: 0 }}><div style={numLabelStyle}>{getTags(t).includes(CT_TAG) ? 'Swap' : 'Locate'}</div><div style={{ ...numValStyle, color: locate > 0 ? C.loss : locate < 0 ? C.profit : C.muted }}>{locate > 0 ? `-${CUR}${locate.toFixed(2)}` : locate < 0 ? `+${CUR}${Math.abs(locate).toFixed(2)}` : `${CUR}0.00`}</div></div>
                   <div style={{ width: W_NUM, textAlign: 'right', flexShrink: 0 }}><div style={numLabelStyle}>Comm</div><div style={{ ...numValStyle, color: commission > 0 ? C.loss : C.muted }}>{commission > 0 ? `-$${commission.toFixed(2)}` : '$0.00'}</div></div>
                 </>)}
                 <div style={{ width: 22, flexShrink: 0, textAlign: 'center' }}>{t.chartImage && <span style={{ fontSize: 14 }} title="Ha uno screenshot">📷</span>}</div>
@@ -1234,7 +1240,8 @@ function TradeLog({ trades, onUpdate, onDelete, onDuplicate, allTags = [], isDes
                       {t.exitPrice != null && <span style={{ color: C.muted }}>Exit <b style={{ color: C.text }}>${t.exitPrice.toFixed(2)}</b></span>}
                       {getSize(t) != null && <span style={{ color: C.muted }}>Size <b style={{ color: C.text }}>{fmtSize(t)}</b></span>}
                       {pips != null && <span style={{ color: C.muted }}>Pips <b style={{ color: pips >= 0 ? C.profit : C.loss }}>{fmtPips(t)}</b></span>}
-                      <span style={{ color: C.muted }}>Locate <b style={{ color: locate > 0 ? C.loss : C.muted }}>-${locate.toFixed(2)}</b></span>
+                      <span style={{ color: C.muted }}>Ora <b style={{ color: C.text }}>{fmtTimes(t)}</b></span>
+                      <span style={{ color: C.muted }}>{getTags(t).includes(CT_TAG) ? 'Swap' : 'Locate'} <b style={{ color: locate > 0 ? C.loss : C.muted }}>-${locate.toFixed(2)}</b></span>
                       <span style={{ color: C.muted }}>Comm <b style={{ color: commission > 0 ? C.loss : C.muted }}>-${commission.toFixed(2)}</b></span>
                     </div>
                   )}
@@ -2129,6 +2136,11 @@ function computeKpis(trades) {
     else { cl++; cw = 0; if (cl > maxL) maxL = cl; }
   });
   const sorted = [...trades].sort((a, b) => a.pnl - b.pnl);
+  const avgDur = list => {
+  const v = list.map(t => t.journal?.durationSec).filter(x => typeof x === 'number');
+  return v.length ? v.reduce((s, x) => s + x, 0) / v.length / 60 : null;
+  };
+
   return {
     n: n, wins: wins.length, losses: losses.length, totalPnl: totalPnl,
     winrate: n ? wins.length / n : 0, avgWin: avgWin, avgLoss: avgLoss,
@@ -2138,6 +2150,7 @@ function computeKpis(trades) {
     locate: trades.reduce((s, t) => s + getLocateCost(t), 0),
     comm: trades.reduce((s, t) => s + getCommission(t), 0),
     pips: pipsList.reduce((s, p) => s + p, 0), pipsN: pipsList.length,
+    durWin: avgDur(wins), durLoss: avgDur(losses),
   };
 }
 
@@ -2161,17 +2174,21 @@ function buildExportData(label, trades) {
     ['Peggior trade', k.worst ? k.worst.ticker + ' ' + r2(k.worst.pnl) : '-'],
     ['Max win di fila', k.maxW],
     ['Max loss di fila', k.maxL],
-    ['Locate totali $', r2(k.locate)],
+    ['Locate / Swap totali', r2(k.locate)],
     ['Commissioni totali $', r2(k.comm)],
     ['Pips totali', k.pipsN ? r2(k.pips) : '-'],
     ['Pips medi/trade', k.pipsN ? r2(k.pips / k.pipsN) : '-'],
+    ['Durata media vincenti (min)', k.durWin != null ? r2(k.durWin) : '-'],
+    ['Durata media perdenti (min)', k.durLoss != null ? r2(k.durLoss) : '-'],
   ];
-  const tradeRows = [['Data', 'Ticker', 'Side', 'Ora', 'Entry', 'Exit', 'Size', 'Unità', 'Pips', 'Locate', 'Comm', 'PnL', 'Tag', 'Perche entrato', 'Cosa successo', 'Note']];
+  const tradeRows = [['Data', 'Ticker', 'Side', 'Ora', 'Ora uscita', 'Durata min', 'Entry', 'Exit', 'Size', 'Unità', 'Pips', 'Locate/Swap', 'Comm', 'PnL', 'Tag', 'Perche entrato', 'Cosa successo', 'Note']];
   [...trades].sort((a, b) => a.date.localeCompare(b.date)).forEach(t => {
     const size = getSize(t);
     const pips = getPips(t);
     tradeRows.push([
       t.date, t.ticker, t.side || '', t.time || '',
+      (t.journal && t.journal.exitTime) || '',
+      (t.journal && typeof t.journal.durationSec === 'number') ? r2(t.journal.durationSec / 60) : '',
       t.entryPrice != null ? r2(t.entryPrice) : '',
       t.exitPrice != null ? r2(t.exitPrice) : '',
       size != null ? r2(size) : '',
@@ -2197,7 +2214,8 @@ function downloadExcel(key, data) {
   const ws1 = XLSX.utils.aoa_to_sheet(data.kpiRows);
   ws1['!cols'] = [{ wch: 24 }, { wch: 22 }];
   const ws2 = XLSX.utils.aoa_to_sheet(data.tradeRows);
-  ws2['!cols'] = [{wch:11},{wch:8},{wch:7},{wch:9},{wch:8},{wch:8},{wch:9},{wch:8},{wch:8},{wch:8},{wch:8},{wch:9},{wch:22},{wch:26},{wch:26},{wch:40}];  const ws3 = XLSX.utils.aoa_to_sheet(data.tagRows);
+  ws2['!cols'] = [{wch:11},{wch:8},{wch:7},{wch:9},{wch:9},{wch:9},{wch:8},{wch:8},{wch:9},{wch:8},{wch:8},{wch:10},{wch:8},{wch:9},{wch:22},{wch:26},{wch:26},{wch:40}];  
+  const ws3 = XLSX.utils.aoa_to_sheet(data.tagRows);
   ws3['!cols'] = [{ wch: 24 }, { wch: 8 }, { wch: 11 }, { wch: 12 }, { wch: 11 }, { wch: 13 }];
   XLSX.utils.book_append_sheet(wb, ws1, 'KPI');
   XLSX.utils.book_append_sheet(wb, ws2, 'Trade');
@@ -2244,7 +2262,7 @@ function buildAiPrompt(label, trades, reviews, reviewKeys, extra) {
   const byDay = groupStats(trades, t => WEEKDAY_NAMES[(new Date(t.date + 'T00:00:00').getDay() + 6) % 7], WEEKDAY_NAMES);
   const withTime = trades.filter(t => t.time);
   const byTime = groupStats(withTime, tradeTimeBucket, timeOrderFor(withTime));
-  
+
   const reviewLines = reviewKeys.filter(key => reviews[key]).map(key => {
     const r = reviews[key];
     return '  - Settimana ' + formatWeekRange(key) + ': voto ' + (r.rating != null ? r.rating : '-') + '/10' + (r.notes ? ' — "' + r.notes + '"' : '');
@@ -2261,6 +2279,7 @@ function buildAiPrompt(label, trades, reviews, reviewKeys, extra) {
     '  Trade: ' + k.n + ' | Winrate: ' + pct(k.winrate) + ' | PnL: ' + num(k.totalPnl) + ' | Expectancy: ' + num(k.expectancy) + '/trade',
     '  Profit factor: ' + k.pf.toFixed(2) + ' | Profit medio: ' + num(k.avgWin) + ' | Loss medio: -' + k.avgLoss.toFixed(0),
     '  Max drawdown: -' + k.maxDD.toFixed(0) + ' | Max win di fila: ' + k.maxW + ' | Max loss di fila: ' + k.maxL,
+    (k.durWin != null || k.durLoss != null) ? '  Durata media trade: vincenti ' + (k.durWin != null ? k.durWin.toFixed(1) + ' min' : '-') + ' | perdenti ' + (k.durLoss != null ? k.durLoss.toFixed(1) + ' min' : '-') : '',
     '',
     'PER STRUMENTO (i più negoziati)', tickerLines.join('\n') || '  (nessun dato)',
     '',
@@ -2410,7 +2429,7 @@ function ReportPanel({ trades, reviews }) {
                     <tr key={i} style={{ borderTop: '1px solid ' + C.border }}>
                       {row.map((cell, j) => (
                         <td key={j} style={{ padding: '6px 10px', whiteSpace: 'nowrap', maxWidth: 180, overflow: 'hidden', textOverflow: 'ellipsis',
-                          color: j === pnlIdx ? (cell >= 0 ? C.profit : C.loss) : C.text, fontWeight: j === 1 || j === 8 ? 700 : 400 }}>{cell}</td>
+                          color: j === pnlIdx ? (cell >= 0 ? C.profit : C.loss) : C.text, fontWeight: j === 1 || j === 10 ? 700 : 400 }}>{cell}</td>
                       ))}
                     </tr>
                   ))}
