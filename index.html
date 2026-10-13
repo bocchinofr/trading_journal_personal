@@ -1937,7 +1937,7 @@ function FilterBar({ trades, filters, setFilters }) {
           <MultiSelectDropdown label="Cosa è successo" options={EVENT_TAGS} selected={filters.eventTags || []} onChange={v => setFilters({ ...filters, eventTags: v })} width={190} placeholder="Tutti" />
           <MultiSelectDropdown label="Giorno" options={WEEKDAY_NAMES} selected={filters.weekdays || []} onChange={v => setFilters({ ...filters, weekdays: v })} width={150} placeholder="Tutti" />
           <MultiSelectDropdown label="Prezzo" options={PRICE_ORDER} selected={filters.priceBuckets || []} onChange={v => setFilters({ ...filters, priceBuckets: v })} width={150} placeholder="Tutte" />
-          <MultiSelectDropdown label="Orario" options={TIME_ORDER} selected={filters.timeBuckets || []} onChange={v => setFilters({ ...filters, timeBuckets: v })} width={170} placeholder="Tutte" />
+          <MultiSelectDropdown label="Orario" options={[...TIME_ORDER, ...CT_TIME_ORDER]} selected={filters.timeBuckets || []} onChange={v => setFilters({ ...filters, timeBuckets: v })} width={170} placeholder="Tutte" />
         </div>
       )}
     </div>
@@ -2022,6 +2022,27 @@ function timeBucket(time) {
   return 'After-hours';
 }
 
+const CT_TIME_ORDER = ['08 - 10', '10 - 12', '12 - 15', '15 - 18', 'Fuori fascia'];
+function ctTimeBucket(time) {
+  if (!time) return null;
+  const h = Number(time.split(':')[0]);
+  if (h >= 8 && h < 10) return '08 - 10';
+  if (h >= 10 && h < 12) return '10 - 12';
+  if (h >= 12 && h < 15) return '12 - 15';
+  if (h >= 15 && h < 18) return '15 - 18';
+  return 'Fuori fascia';
+}
+// sceglie la fascia giusta in base al conto
+function tradeTimeBucket(t) {
+  return getTags(t).includes(CT_TAG) ? ctTimeBucket(t.time) : timeBucket(t.time);
+}
+// mostra solo le fasce dei conti presenti nei trade filtrati
+function timeOrderFor(trades) {
+  const ct = trades.some(t => getTags(t).includes(CT_TAG));
+  const tz = trades.some(t => !getTags(t).includes(CT_TAG));
+  return [...(tz || !ct ? TIME_ORDER : []), ...(ct ? CT_TIME_ORDER : [])];
+}
+
 function TagsSection({ tagRows }) {
   if (!tagRows.length) return (
     <div style={{ background: C.card, border: `1px dashed ${C.border}`, borderRadius: 12, padding: 20 }}>
@@ -2059,7 +2080,7 @@ function StrategyView({ trades }) {
   const byWeekday = useMemo(() => groupStats(trades, t => WEEKDAY_NAMES[(new Date(t.date + 'T00:00:00').getDay() + 6) % 7], WEEKDAY_NAMES), [trades]);
   const byPrice = useMemo(() => groupStats(trades.filter(t => t.entryPrice != null), t => priceBucket(t.entryPrice), PRICE_ORDER), [trades]);
   const withTime = useMemo(() => trades.filter(t => t.time), [trades]);
-  const byTime = useMemo(() => groupStats(withTime, t => timeBucket(t.time), TIME_ORDER), [trades]);
+  const byTime = useMemo(() => groupStats(withTime, tradeTimeBucket, timeOrderFor(withTime)), [trades]);
 
   if (trades.length === 0) return (
     <div style={{ background: C.card, border: `1px dashed ${C.border}`, borderRadius: 12, padding: 30, textAlign: 'center', color: C.muted, fontSize: 14 }}>Nessun trade da analizzare</div>
@@ -2222,8 +2243,8 @@ function buildAiPrompt(label, trades, reviews, reviewKeys, extra) {
   const bySide = groupStats(trades, t => t.side === 'short' ? 'Short' : t.side === 'long' ? 'Long' : null);
   const byDay = groupStats(trades, t => WEEKDAY_NAMES[(new Date(t.date + 'T00:00:00').getDay() + 6) % 7], WEEKDAY_NAMES);
   const withTime = trades.filter(t => t.time);
-  const byTime = groupStats(withTime, t => timeBucket(t.time), TIME_ORDER);
-
+  const byTime = groupStats(withTime, tradeTimeBucket, timeOrderFor(withTime));
+  
   const reviewLines = reviewKeys.filter(key => reviews[key]).map(key => {
     const r = reviews[key];
     return '  - Settimana ' + formatWeekRange(key) + ': voto ' + (r.rating != null ? r.rating : '-') + '/10' + (r.notes ? ' — "' + r.notes + '"' : '');
@@ -2558,7 +2579,7 @@ function TradingJournal() {
         if (t.entryPrice == null || !filters.priceBuckets.includes(priceBucket(t.entryPrice))) return false;
       }
       if (filters.timeBuckets && filters.timeBuckets.length) {
-        if (!t.time || !filters.timeBuckets.includes(timeBucket(t.time))) return false;
+        if (!t.time || !filters.timeBuckets.includes(tradeTimeBucket(t))) return false;
       }
       if (filters.entryTags && filters.entryTags.length) {
         const et = t.journal?.entryTags || [];
