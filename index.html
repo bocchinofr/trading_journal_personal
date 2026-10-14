@@ -1223,7 +1223,7 @@ function TradeLog({ trades, onUpdate, onDelete, onDuplicate, allTags = [], isDes
                   {hasWarning
                     ? <span style={{ fontSize: 14, cursor: 'help' }} title={`Esecuzione da migliorare: ${warningTags.join(', ')}`}>⚠️</span>
                     : isGoodTrade(t)
-                      ? <span style={{ fontSize: 14, cursor: 'help' }} title="Buon trade / tutte le conferme">✅,</span>
+                      ? <span style={{ fontSize: 14, cursor: 'help' }} title="Buon trade / tutte le conferme">✅</span>
                       : null}
                 </div>
                 <span style={{ fontSize: isDesktop ? 18 : 14, fontWeight: 800, fontFamily: 'monospace', color: t.pnl >= 0 ? C.profit : C.loss, flexShrink: 0, width: W_PNL, textAlign: 'right' }}>{fmt$(t.pnl)}</span>
