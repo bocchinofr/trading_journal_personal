@@ -466,6 +466,10 @@ function getWarningTags(t) {
   if (!t.journal?.eventTags?.length) return [];
   return t.journal.eventTags.filter(e => !POSITIVE_EVENT_TAGS.includes(e));
 }
+function isGoodTrade(t) {
+  const j = t.journal || {};
+  return (j.eventTags || []).includes('Buon trade') || (j.entryTags || []).includes('Tutte le conferme');
+}
 
 // ════════════════════════════════════════════════════════════
 // KPI STRIP
@@ -1203,22 +1207,8 @@ function TradeLog({ trades, onUpdate, onDelete, onDuplicate, allTags = [], isDes
                 <span style={{ fontSize: isDesktop ? 14 : 12, color: C.muted, width: W_DATE, flexShrink: 0, fontFamily: 'monospace' }}>{t.date}</span>
                 <span style={{ fontSize: isDesktop ? 17 : 13, fontWeight: 800, color: C.text, width: W_TICKER, flexShrink: 0 }}>{t.ticker}</span>
                 <span style={{ fontSize: 11, fontWeight: 800, padding: '3px 8px', borderRadius: 4, flexShrink: 0, width: 58, textAlign: 'center', background: t.side === 'short' ? 'rgba(255,138,128,0.15)' : 'rgba(95,216,143,0.15)', color: t.side === 'short' ? C.loss : C.profit }}>{t.side === 'short' ? 'SHORT' : 'LONG'}</span>
-                {(() => {
-                  const eTag = t.journal?.eventTags?.[0];
-                  if (!eTag) return null;
-                  const positive = POSITIVE_EVENT_TAGS.includes(eTag);
-                  return (
-                    <span style={{
-                      fontSize: 11, fontWeight: 700, padding: '3px 9px', borderRadius: 8, flexShrink: 0,
-                      background: positive ? 'rgba(95,216,143,0.15)' : 'rgba(255,138,128,0.15)',
-                      color: positive ? C.profit : C.loss, whiteSpace: 'nowrap',
-                    }}>{eTag}</span>
-                  );
-                })()}
-                <div style={{ display: 'flex', gap: 4, flex: 1, overflow: 'hidden', minWidth: 0 }}>
-                  {getTags(t).slice(0, isDesktop ? 2 : 1).map(tag => (<span key={tag} style={{ fontSize: 11, fontWeight: 700, padding: '3px 9px', borderRadius: 8, background: `${C.accent}18`, color: C.accent, whiteSpace: 'nowrap' }}>{tag}</span>))}
-                  {getTags(t).length > (isDesktop ? 2 : 1) && <span style={{ fontSize: 11, color: C.muted }}>+{getTags(t).length - (isDesktop ? 2 : 1)}</span>}
-                </div>
+
+                <div style={{ flex: 1, minWidth: 0 }} />
                 {isDesktop && (<>
                   <div style={{ width: 150, textAlign: 'right', flexShrink: 0 }}><div style={numLabelStyle}>Ora · Durata</div><div style={{ ...numValStyle, fontSize: 13, color: C.text }}>{fmtTimes(t)}</div></div>
                   <div style={{ width: W_NUM, textAlign: 'right', flexShrink: 0 }}><div style={numLabelStyle}>Entry</div><div style={{ ...numValStyle, color: C.text }}>{t.entryPrice != null ? `$${t.entryPrice.toFixed(2)}` : '—'}</div></div>
@@ -1229,7 +1219,13 @@ function TradeLog({ trades, onUpdate, onDelete, onDuplicate, allTags = [], isDes
                   <div style={{ width: W_NUM, textAlign: 'right', flexShrink: 0 }}><div style={numLabelStyle}>Comm</div><div style={{ ...numValStyle, color: commission > 0 ? C.loss : C.muted }}>{commission > 0 ? `-$${commission.toFixed(2)}` : '$0.00'}</div></div>
                 </>)}
                 <div style={{ width: 22, flexShrink: 0, textAlign: 'center' }}>{t.chartImage && <span style={{ fontSize: 14 }} title="Ha uno screenshot">📷</span>}</div>
-                <div style={{ width: 22, flexShrink: 0, textAlign: 'center' }}>{hasWarning && <span style={{ fontSize: 14, cursor: 'help' }} title={`Esecuzione da migliorare: ${warningTags.join(', ')}`}>⚠️</span>}</div>
+                <div style={{ width: 22, flexShrink: 0, textAlign: 'center' }}>
+                  {hasWarning
+                    ? <span style={{ fontSize: 14, cursor: 'help' }} title={`Esecuzione da migliorare: ${warningTags.join(', ')}`}>⚠️</span>
+                    : isGoodTrade(t)
+                      ? <span style={{ fontSize: 14, cursor: 'help' }} title="Buon trade / tutte le conferme">✅,</span>
+                      : null}
+                </div>
                 <span style={{ fontSize: isDesktop ? 18 : 14, fontWeight: 800, fontFamily: 'monospace', color: t.pnl >= 0 ? C.profit : C.loss, flexShrink: 0, width: W_PNL, textAlign: 'right' }}>{fmt$(t.pnl)}</span>
                 <span style={{ color: C.muted, fontSize: 13, flexShrink: 0, width: 16, textAlign: 'center' }}>{expandedId === t.id ? '▲' : '▼'}</span>
               </div>
