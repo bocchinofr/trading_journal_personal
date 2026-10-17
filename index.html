@@ -2545,6 +2545,54 @@ function MobileMenu({ tab, setTab, theme, toggleTheme, onExport, onAddTrade, onC
   );
 }
 
+function DayTradesPanel({ date, trades, onClose, onOpenLog }) {
+  const total = trades.reduce((s, t) => s + t.pnl, 0);
+  const th = { padding: '6px 10px', textAlign: 'left', fontSize: 10, color: C.muted, textTransform: 'uppercase', whiteSpace: 'nowrap' };
+  return (
+    <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, overflow: 'hidden' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '10px 16px', background: C.card2 }}>
+        <span style={{ fontSize: 14, fontWeight: 800, color: C.accent }}>Trade del {date}</span>
+        <span style={{ fontSize: 13, color: C.muted }}>{trades.length} trade</span>
+        <span style={{ fontSize: 14, fontWeight: 800, fontFamily: 'monospace', color: total >= 0 ? C.profit : C.loss }}>{fmt$(total)}</span>
+        <div style={{ flex: 1 }} />
+        <button onClick={onOpenLog} style={{ padding: '5px 12px', borderRadius: 6, border: `1px solid ${C.accent}55`, background: `${C.accent}15`, color: C.accent, fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>Apri nel Trade Log</button>
+        <span onClick={onClose} style={{ color: C.muted, cursor: 'pointer', fontSize: 16 }}>✕</span>
+      </div>
+      <div style={{ overflowX: 'auto' }}>
+        <table style={{ width: '100%', fontSize: 13, fontFamily: 'monospace', borderCollapse: 'collapse' }}>
+          <thead>
+            <tr>{['Ticker','Side','Tag','Entry','Exit','Size','Pips','Locate','Comm','PnL',''].map(h => <th key={h} style={th}>{h}</th>)}</tr>
+          </thead>
+          <tbody>
+            {trades.map(t => {
+              const loc = getLocateCost(t), com = getCommission(t), pips = getPips(t);
+              const warn = getWarningTags(t);
+              return (
+                <tr key={t.id} style={{ borderTop: `1px solid ${C.border}` }}>
+                  <td style={{ padding: '8px 10px', fontWeight: 800, color: C.text }}>{t.ticker}</td>
+                  <td style={{ padding: '8px 10px', color: t.side === 'short' ? C.loss : C.profit, fontWeight: 700 }}>{t.side === 'short' ? 'SHORT' : 'LONG'}</td>
+                  <td style={{ padding: '8px 10px', color: C.accent, fontSize: 12 }}>{getTags(t).join(', ') || '—'}</td>
+                  <td style={{ padding: '8px 10px' }}>{t.entryPrice != null ? '$' + t.entryPrice.toFixed(2) : '—'}</td>
+                  <td style={{ padding: '8px 10px' }}>{t.exitPrice != null ? '$' + t.exitPrice.toFixed(2) : '—'}</td>
+                  <td style={{ padding: '8px 10px' }}>{fmtSize(t)}</td>
+                  <td style={{ padding: '8px 10px', color: pips == null ? C.muted : pips >= 0 ? C.profit : C.loss }}>{fmtPips(t)}</td>
+                  <td style={{ padding: '8px 10px', color: loc > 0 ? C.loss : C.muted }}>{loc > 0 ? '-$' + loc.toFixed(2) : '—'}</td>
+                  <td style={{ padding: '8px 10px', color: com > 0 ? C.loss : C.muted }}>{com > 0 ? '-$' + com.toFixed(2) : '—'}</td>
+                  <td style={{ padding: '8px 10px', fontWeight: 800, color: t.pnl >= 0 ? C.profit : C.loss }}>{fmt$(t.pnl)}</td>
+                  <td style={{ padding: '8px 10px' }}>
+                    {t.chartImage && <span title="Screenshot">📷</span>}
+                    {warn.length > 0 && <span title={warn.join(', ')} style={{ marginLeft: 4 }}>⚠️</span>}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 function TradingJournal() {
   const [trades, setTrades] = useState([]);
   const [reviews, setReviews] = useState({});
@@ -2725,19 +2773,12 @@ function TradingJournal() {
                     {isDesktop && (<LastMonthsSidebar trades={filteredTrades} onDayClick={setSelectedDay} />)}
                   </div>
                   {selectedDay && (
-                    <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, padding: 18, maxWidth: 720 }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 10 }}>
-                        <span style={{ fontSize: 14, fontWeight: 700, color: C.accent }}>Trade del {selectedDay}</span>
-                        <span onClick={() => setSelectedDay(null)} style={{ color: C.muted, cursor: 'pointer', fontSize: 14 }}>✕</span>
-                      </div>
-                      {dayTrades.map(t => (
-                        <div key={t.id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 14, padding: '7px 0', borderBottom: `1px solid ${C.border}` }}>
-                          <span style={{ color: C.text, fontWeight: 700 }}>{t.ticker}</span>
-                          <span style={{ color: C.muted }}>{getTags(t).join(', ')}</span>
-                          <span style={{ color: t.pnl >= 0 ? C.profit : C.loss, fontFamily: 'monospace', fontWeight: 700 }}>{fmt$(t.pnl)}</span>
-                        </div>
-                      ))}
-                    </div>
+                    <DayTradesPanel
+                      date={selectedDay}
+                      trades={dayTrades}
+                      onClose={() => setSelectedDay(null)}
+                      onOpenLog={() => { setFilters(f => ({ ...f, dateFrom: selectedDay, dateTo: selectedDay })); setTab('log'); }}
+                    />
                   )}
                 </>
               ) : (<YearView trades={filteredTrades} onDayClick={setSelectedDay} />)}
