@@ -624,20 +624,21 @@ function MonthCalendar({ trades, onDayClick, isDesktop, cursor, setCursor }) {
   const intensity = pnl => C.calMin + Math.min(Math.abs(pnl) / 300, 1) * C.calRange;
 
   return (
-    <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: isDesktop ? 14 : 12 }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+    <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: isDesktop ? 22 : 14, display: 'flex', flexDirection: 'column', boxSizing: 'border-box' }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
         <button onClick={() => setCursor(c => c.m === 0 ? { y: c.y - 1, m: 11 } : { y: c.y, m: c.m - 1 })} style={navBtnStyle}>‹</button>
         <div style={{ textAlign: 'center' }}>
-          <div style={{ fontWeight: 800, fontSize: isDesktop ? 18 : 16, color: C.text }}>{monthNames[cursor.m]} {cursor.y}</div>
-          <div style={{ fontSize: isDesktop ? 14 : 13, fontFamily: 'monospace', color: monthTotal >= 0 ? C.profit : C.loss, marginTop: 3, fontWeight: 700 }}>{fmt$(monthTotal)}</div>
+          <div style={{ fontWeight: 800, fontSize: isDesktop ? 22 : 17, color: C.text }}>{monthNames[cursor.m]} {cursor.y}</div>
+          <div style={{ fontSize: isDesktop ? 17 : 14, fontFamily: 'monospace', color: monthTotal >= 0 ? C.profit : C.loss, marginTop: 3, fontWeight: 700 }}>{fmt$(monthTotal)}</div>
         </div>
         <button onClick={() => setCursor(c => c.m === 11 ? { y: c.y + 1, m: 0 } : { y: c.y, m: c.m + 1 })} style={navBtnStyle}>›</button>
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 4, marginBottom: 6 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 6, marginBottom: 6 }}>
         {dayLabels.map((d, i) => (<div key={i} style={{ textAlign: 'center', fontSize: 13, color: C.muted, fontWeight: 700 }}>{d}</div>))}
       </div>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 4 }}>
+
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 6, flex: 1, gridAutoRows: '1fr' }}>
         {cells.map((d, i) => {
           if (d === null) return <div key={i} />;
           const key = `${cursor.y}-${String(cursor.m + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
@@ -646,7 +647,7 @@ function MonthCalendar({ trades, onDayClick, isDesktop, cursor, setCursor }) {
           const bg = !has ? C.card2 : info.pnl >= 0 ? `rgba(${C.calPos},${intensity(info.pnl)})` : `rgba(${C.calNeg},${intensity(info.pnl)})`;
           return (
             <div key={i} onClick={() => has && onDayClick(key)} style={{
-              aspectRatio: isDesktop ? '2.1' : '1.35', borderRadius: 8, background: bg, position: 'relative',
+              minHeight: 0, borderRadius: 8, background: bg, position: 'relative',
               border: `1px solid ${has ? 'transparent' : C.border}`,
               display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
               cursor: has ? 'pointer' : 'default', padding: 4,
@@ -654,12 +655,12 @@ function MonthCalendar({ trades, onDayClick, isDesktop, cursor, setCursor }) {
               {has && info.hasWarning && (
                 <span style={{ position: 'absolute', top: 4, right: 6, fontSize: isDesktop ? 13 : 10 }} title="Tag negativi in questo giorno">⚠️</span>
               )}
-              <span style={{ fontSize: isDesktop ? 16 : 15, color: has ? C.text : C.muted, fontWeight: 800, lineHeight: 1 }}>{d}</span>
+              <span style={{ fontSize: isDesktop ? 22 : 16, color: has ? C.text : C.muted, fontWeight: 800, lineHeight: 1 }}>{d}</span>
               {has && (<>
-                <span style={{ fontSize: isDesktop ? 13 : 12, fontFamily: 'monospace', fontWeight: 800, color: info.pnl >= 0 ? C.profit : C.loss, marginTop: 4, lineHeight: 1 }}>
+                <span style={{ fontSize: isDesktop ? 17 : 13, fontFamily: 'monospace', fontWeight: 800, color: info.pnl >= 0 ? C.profit : C.loss, marginTop: 4, lineHeight: 1 }}>
                   {info.pnl >= 0 ? '+' : ''}{Math.round(info.pnl)}
                 </span>
-                <span style={{ fontSize: isDesktop ? 11 : 10, color: C.muted, marginTop: 3, lineHeight: 1 }}>{info.count} tr.</span>
+                <span style={{ fontSize: isDesktop ? 13 : 10, color: C.muted, marginTop: 3, lineHeight: 1 }}>{info.count} tr.</span>
               </>)}
             </div>
           );
@@ -2768,7 +2769,7 @@ function TradingJournal() {
               </div>
               {calendarView === 'month' ? (
                 <>
-                  <div style={{ display: 'grid', gridTemplateColumns: isWide ? 'minmax(0, 1fr) 360px' : '1fr', gap: 20, alignItems: 'start' }}>
+                  <div style={{ display: 'grid', gridTemplateColumns: isWide ? 'minmax(0, 1fr) 360px' : '1fr', gap: 20, alignItems: 'stretch' }}>
                     <MonthCalendar trades={filteredTrades} onDayClick={setSelectedDay} isDesktop={isDesktop} cursor={calendarCursor} setCursor={setCalendarCursor} />
                     {isDesktop && (<LastMonthsSidebar trades={filteredTrades} onDayClick={setSelectedDay} />)}
                   </div>
