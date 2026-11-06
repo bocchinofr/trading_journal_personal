@@ -1644,6 +1644,10 @@ function PendingNotesList({ notes, onDelete }) {
   );
 }
 
+
+const normTk = s => String(s || '').trim().toUpperCase();
+const normDate = s => String(s || '').slice(0, 10);
+
 // ════════════════════════════════════════════════════════════
 // IMPORT
 // ════════════════════════════════════════════════════════════
@@ -1680,9 +1684,9 @@ function ImportPanel({ existingTrades, onImport, pendingNotes, onDeleteNote }) {
     if (!srcRows) { setPreview([]); return; }
     const trips = source === 'ct' ? buildTripsFromCTrader(srcRows) : buildRoundTripsFromTradeHistory(srcRows);
     const notesByKey = {};
-    pendingNotes.filter(n => !n.used).forEach(n => { const key = `${n.date}__${n.ticker}`; (notesByKey[key] = notesByKey[key] || []).push(n); });
+    pendingNotes.filter(n => !n.used).forEach(n => { const key = `${normDate(n.date)}__${normTk(n.ticker)}`; (notesByKey[key] = notesByKey[key] || []).push(n); });
     const tripIdxsByKey = {};
-    trips.forEach((t, i) => { const key = `${t.date}__${t.ticker}`; (tripIdxsByKey[key] = tripIdxsByKey[key] || []).push(i); });
+    trips.forEach((t, i) => { const key = `${normDate(tradeRows.date)}__${normTk(t.ticker)}`; (tripIdxsByKey[key] = tripIdxsByKey[key] || []).push(i); });
     const matchByIdx = {};
     Object.entries(tripIdxsByKey).forEach(([key, idxs]) => {
       const notes = notesByKey[key] || [];
@@ -1795,7 +1799,7 @@ function ImportPanel({ existingTrades, onImport, pendingNotes, onDeleteNote }) {
                         onChange={e => { const noteId = e.target.value || null; const note = pendingNotes.find(n => n.id === noteId) || null; setPreview(p => p.map((x, j) => j === i ? { ...x, matchedNoteId: noteId, matchedNote: note } : x)); }}
                         style={{ background: C.card2, color: t.matchedNote ? C.accent : C.muted, border: `1px solid ${C.border}`, borderRadius: 4, padding: '4px 6px', fontSize: 12, maxWidth: 160 }}>
                         <option value="">— nessuna —</option>
-                        {pendingNotes.filter(n => !n.used && n.date === t.date && n.ticker === t.ticker).map(n => (<option key={n.id} value={n.id}>{(n.journal?.entryTags || []).join(', ') || n.notes || 'nota'}</option>))}
+                        {pendingNotes.filter(n => !n.used && normDate(n.date) === normDate(t.date) && normTk(n.ticker) === normTk(t.ticker)).map(n => (<option key={n.id} value={n.id}>{(n.journal?.entryTags || []).join(', ') || n.notes || 'nota'}</option>))}
                       </select>
                     </td>
                     <td style={{ padding: '7px 10px', fontSize: 11 }}>
