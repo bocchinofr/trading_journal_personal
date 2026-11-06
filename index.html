@@ -1799,7 +1799,11 @@ function ImportPanel({ existingTrades, onImport, pendingNotes, onDeleteNote }) {
                         onChange={e => { const noteId = e.target.value || null; const note = pendingNotes.find(n => n.id === noteId) || null; setPreview(p => p.map((x, j) => j === i ? { ...x, matchedNoteId: noteId, matchedNote: note } : x)); }}
                         style={{ background: C.card2, color: t.matchedNote ? C.accent : C.muted, border: `1px solid ${C.border}`, borderRadius: 4, padding: '4px 6px', fontSize: 12, maxWidth: 160 }}>
                         <option value="">— nessuna —</option>
-                        {pendingNotes.filter(n => !n.used && normDate(n.date) === normDate(t.date) && normTk(n.ticker) === normTk(t.ticker)).map(n => (<option key={n.id} value={n.id}>{(n.journal?.entryTags || []).join(', ') || n.notes || 'nota'}</option>))}
+                        {pendingNotes.filter(n => !n.used).sort((a, b) => {
+                          const ma = normDate(a.date) === normDate(t.date) && normTk(a.ticker) === normTk(t.ticker) ? 0 : 1;
+                          const mb = normDate(b.date) === normDate(t.date) && normTk(b.ticker) === normTk(t.ticker) ? 0 : 1;
+                          return ma - mb;
+                        }).map(n => (<option key={n.id} value={n.id}>{n.date.slice(5)} · {n.ticker} · {(n.journal?.entryTags || []).join(', ') || n.notes || 'nota'}</option>))}
                       </select>
                     </td>
                     <td style={{ padding: '7px 10px', fontSize: 11 }}>
