@@ -1686,7 +1686,7 @@ function ImportPanel({ existingTrades, onImport, pendingNotes, onDeleteNote }) {
     const notesByKey = {};
     pendingNotes.filter(n => !n.used).forEach(n => { const key = `${normDate(n.date)}__${normTk(n.ticker)}`; (notesByKey[key] = notesByKey[key] || []).push(n); });
     const tripIdxsByKey = {};
-    trips.forEach((t, i) => { const key = `${normDate(tradeRows.date)}__${normTk(t.ticker)}`; (tripIdxsByKey[key] = tripIdxsByKey[key] || []).push(i); });
+    trips.forEach((t, i) => { const key = `${normDate(t.date)}__${normTk(t.ticker)}`;
     const matchByIdx = {};
     Object.entries(tripIdxsByKey).forEach(([key, idxs]) => {
       const notes = notesByKey[key] || [];
