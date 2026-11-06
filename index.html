@@ -1010,7 +1010,7 @@ function AddTradeForm({ onAddTrade, onAddNote, allTags = [], onClose, isDesktop 
   const submitFull = () => {
     if (!f.date || !f.ticker || f.pnl === '') return;
     onAddTrade({
-      id: uuid(), date: f.date, ticker: f.ticker.toUpperCase(), tags, side: f.side,
+      id: uuid(), date: f.date, ticker: f.ticker.trim().toUpperCase(), tags, side: f.side,
       entryPrice: f.entryPrice ? Number(f.entryPrice) : null,
       exitPrice: f.exitPrice ? Number(f.exitPrice) : null,
       time: f.time || null, pnl: Number(f.pnl),
@@ -1024,7 +1024,7 @@ function AddTradeForm({ onAddTrade, onAddNote, allTags = [], onClose, isDesktop 
   };
   const submitQuick = () => {
     if (!f.date || !f.ticker) return;
-    onAddNote({ id: uuid(), date: f.date, ticker: f.ticker.toUpperCase(), notes: f.notes, journal, chartImage, used: false });
+    onAddNote({ id: uuid(), date: f.date, ticker: f.ticker.trim().toUpperCase(), notes: f.notes, journal, chartImage, used: false });
     reset();
   };
 
