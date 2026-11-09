@@ -326,6 +326,9 @@ function buildRoundTripsFromTradeHistory(rows) {
 // ─────────────────────────────────────────────────────────────
 const CT_TAG = 'Import cTrader';
 const TZ_TAG = 'Import TradeZero';
+const BT_TAG = 'Backtest';
+const isBT = t => getTags(t).includes(BT_TAG);
+function costLabel(t) { const g = getTags(t); return g.includes(CT_TAG) ? 'Swap' : g.includes(BT_TAG) ? 'Costi' : 'Locate'; }
 
 function parseLooseNumber(v) {
   let x = String(v == null ? '' : v).replace(/[\s\u00a0\u202f]/g, '').replace(/[^0-9,.\-]/g, '');
@@ -396,6 +399,74 @@ function buildTripsFromCTrader(rows) {
   return out;
 }
 
+
+// ─────────────────────────────────────────────────────────────
+// BACKTEST FX REPLAY: tabella trade copiata e incollata
+// Date/orari FX Replay in UTC (formato m/d/yy, h:mm:ss AM/PM) -> convertiti in ora italiana (Europe/Rome, con ora legale automatica)
+// Prezzi con punto decimale (24,546.12), P&L con virgola decimale (20,24)
+// ─────────────────────────────────────────────────────────────
+const ROME_FMT = (typeof Intl !== 'undefined') ? new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/Rome', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' }) : null;
+function utcToRome(ms) {
+  const p = {};
+  ROME_FMT.formatToParts(new Date(ms)).forEach(x => { p[x.type] = x.value; });
+  return { date: p.year + '-' + p.month + '-' + p.day, time: p.hour + ':' + p.minute + ':' + p.second };
+}
+function fxrDate(str) {
+  const m = String(str || '').trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4}),?\s+(\d{1,2}):(\d{2}):(\d{2})\s*([AP]M)$/i);
+  if (!m) return null;
+  let y = +m[3]; if (y < 100) y += 2000;
+  let h = +m[4] % 12; if (m[7].toUpperCase() === 'PM') h += 12;
+  return Date.UTC(y, +m[1] - 1, +m[2], h, +m[5], +m[6]);
+}
+function parsePrice(v) {
+  const x = String(v == null ? '' : v).replace(/,/g, '').replace(/[^0-9.\-]/g, '');
+  const n = Number(x);
+  return x === '' || isNaN(n) ? null : n;
+}
+function parseFxReplayPaste(text, strategyOverride) {
+  const tok = String(text || '').split(/[\t\r\n]+/).map(x => x.trim()).filter(Boolean);
+  const closedIdx = [];
+  tok.forEach((x, i) => { if (x.toLowerCase() === 'closed') closedIdx.push(i); });
+  const out = [];
+  closedIdx.forEach((ci, k) => {
+    const strat = ci > 0 ? tok[ci - 1] : '';
+    const end = k + 1 < closedIdx.length ? closedIdx[k + 1] - 1 : tok.length;
+    const b = tok.slice(ci + 1, end);
+    const dts = [];
+    b.forEach((x, i) => { const ms = fxrDate(x); if (ms != null) dts.push({ i, ms }); });
+    if (dts.length < 3) return;
+    const entryMs = dts[1].ms, exitMs = dts[2].ms, closeI = dts[2].i;
+    const pre = b.slice(Math.max(0, closeI - 4), closeI);   // entry, size, SL, TP
+    const post = b.slice(closeI + 1);                        // exit, gross P&L, fees
+    if (pre.length < 4 || post.length < 2) return;
+    const asset = b.find(x => /^[A-Za-z0-9_]+:[A-Za-z0-9._-]+$/.test(x)) || '';
+    const sideTok = b.find(x => /^(buy|sell)$/i.test(x));
+    if (!asset || !sideTok) return;
+    const side = /^buy$/i.test(sideTok) ? 'long' : 'short';
+    const entryPrice = parsePrice(pre[0]), exitPrice = parsePrice(post[0]);
+    if (entryPrice == null || exitPrice == null) return;
+    const fees = post.length > 2 ? Math.abs(parseLooseNumber(post[2])) : 0;
+    const pnl = parseLooseNumber(post[1]) - fees;
+    const points = Math.round((side === 'long' ? exitPrice - entryPrice : entryPrice - exitPrice) * 100) / 100;
+    const e = utcToRome(entryMs), x = utcToRome(exitMs);
+    out.push({
+      ticker: asset.split(':').pop().toUpperCase(),
+      date: e.date, side, entryPrice, exitPrice,
+      qty: parseLooseNumber(pre[1]),
+      pnlFromProceeds: pnl, commission: fees, swap: 0,
+      time: e.time, exitTime: x.time,
+      durationSec: Math.round((exitMs - entryMs) / 1000),
+      sortTime: e.date + ' ' + e.time,
+      pips: points,
+      stopLoss: pre[2] === '-' ? null : parsePrice(pre[2]),
+      takeProfit: pre[3] === '-' ? null : parsePrice(pre[3]),
+      strategy: (strategyOverride && strategyOverride.trim()) || strat || 'Senza nome',
+      _ms: entryMs,
+    });
+  });
+  return out.sort((a, b) => a._ms - b._ms);
+}
+
 function buildLocateCostMap(rows) {
   const map = {};
   rows.forEach(r => {
@@ -437,6 +508,7 @@ function getPips(t) {
 function fmtSize(t) {
   const s = getSize(t);
   if (s == null) return '—';
+  if (getTags(t).includes(BT_TAG)) return (Math.round(s * 100) / 100) + ' ctr';
   return getTags(t).includes(CT_TAG) ? (Math.round(s * 100) / 100) + ' lot' : Math.round(s).toLocaleString('it-IT') + ' sh';
 }
 function fmtPips(t) {
@@ -1216,7 +1288,7 @@ function TradeLog({ trades, onUpdate, onDelete, onDuplicate, allTags = [], isDes
                   <div style={{ width: W_NUM, textAlign: 'right', flexShrink: 0 }}><div style={numLabelStyle}>Exit</div><div style={{ ...numValStyle, color: C.text }}>{t.exitPrice != null ? `$${t.exitPrice.toFixed(2)}` : '—'}</div></div>
                   <div style={{ width: 92, textAlign: 'right', flexShrink: 0 }}><div style={numLabelStyle}>Size</div><div style={{ ...numValStyle, color: C.text }}>{fmtSize(t)}</div></div>
                   <div style={{ width: 70, textAlign: 'right', flexShrink: 0 }}><div style={numLabelStyle}>Pips</div><div style={{ ...numValStyle, color: pips == null ? C.muted : pips >= 0 ? C.profit : C.loss }}>{fmtPips(t)}</div></div>
-                  <div style={{ width: W_NUM, textAlign: 'right', flexShrink: 0 }}><div style={numLabelStyle}>{getTags(t).includes(CT_TAG) ? 'Swap' : 'Locate'}</div><div style={{ ...numValStyle, color: locate > 0 ? C.loss : locate < 0 ? C.profit : C.muted }}>{locate > 0 ? `-${CUR}${locate.toFixed(2)}` : locate < 0 ? `+${CUR}${Math.abs(locate).toFixed(2)}` : `${CUR}0.00`}</div></div>
+                  <div style={{ width: W_NUM, textAlign: 'right', flexShrink: 0 }}><div style={numLabelStyle}>{costLabel(t)}</div><div style={{ ...numValStyle, color: locate > 0 ? C.loss : locate < 0 ? C.profit : C.muted }}>{locate > 0 ? `-${CUR}${locate.toFixed(2)}` : locate < 0 ? `+${CUR}${Math.abs(locate).toFixed(2)}` : `${CUR}0.00`}</div></div>
                   <div style={{ width: W_NUM, textAlign: 'right', flexShrink: 0 }}><div style={numLabelStyle}>Comm</div><div style={{ ...numValStyle, color: commission > 0 ? C.loss : C.muted }}>{commission > 0 ? `-$${commission.toFixed(2)}` : '$0.00'}</div></div>
                 </>)}
                 <div style={{ width: 22, flexShrink: 0, textAlign: 'center' }}>{t.chartImage && <span style={{ fontSize: 14 }} title="Ha uno screenshot">📷</span>}</div>
@@ -1240,7 +1312,7 @@ function TradeLog({ trades, onUpdate, onDelete, onDuplicate, allTags = [], isDes
                       {getSize(t) != null && <span style={{ color: C.muted }}>Size <b style={{ color: C.text }}>{fmtSize(t)}</b></span>}
                       {pips != null && <span style={{ color: C.muted }}>Pips <b style={{ color: pips >= 0 ? C.profit : C.loss }}>{fmtPips(t)}</b></span>}
                       <span style={{ color: C.muted }}>Ora <b style={{ color: C.text }}>{fmtTimes(t)}</b></span>
-                      <span style={{ color: C.muted }}>{getTags(t).includes(CT_TAG) ? 'Swap' : 'Locate'} <b style={{ color: locate > 0 ? C.loss : C.muted }}>-${locate.toFixed(2)}</b></span>
+                      <span style={{ color: C.muted }}>{costLabel(t)} <b style={{ color: locate > 0 ? C.loss : C.muted }}>-${locate.toFixed(2)}</b></span>
                       <span style={{ color: C.muted }}>Comm <b style={{ color: commission > 0 ? C.loss : C.muted }}>-${commission.toFixed(2)}</b></span>
                     </div>
                   )}
@@ -1660,6 +1732,8 @@ function ImportPanel({ existingTrades, onImport, pendingNotes, onDeleteNote }) {
   const [preview, setPreview] = useState([]);
   const [selected, setSelected] = useState({});
   const [error, setError] = useState('');
+  const [btText, setBtText] = useState('');
+  const [btStrategy, setBtStrategy] = useState('');
 
   const handleFile = (file, kind) => {
     const reader = new FileReader();
@@ -1680,11 +1754,11 @@ function ImportPanel({ existingTrades, onImport, pendingNotes, onDeleteNote }) {
   };
 
   useEffect(() => {
-    const srcRows = source === 'ct' ? ctRows : tradeRows;
+    const srcRows = source === 'ct' ? ctRows : source === 'bt' ? (btText.trim() ? btText : null) : tradeRows;
     if (!srcRows) { setPreview([]); return; }
-    const trips = source === 'ct' ? buildTripsFromCTrader(srcRows) : buildRoundTripsFromTradeHistory(srcRows);
+    const trips = source === 'ct' ? buildTripsFromCTrader(srcRows) : source === 'bt' ? parseFxReplayPaste(btText, btStrategy) : buildRoundTripsFromTradeHistory(srcRows);
     const notesByKey = {};
-    pendingNotes.filter(n => !n.used).forEach(n => { const key = `${normDate(n.date)}__${normTk(n.ticker)}`; (notesByKey[key] = notesByKey[key] || []).push(n); });
+    pendingNotes.filter(n => !n.used && source !== 'bt').forEach(n => { const key = `${normDate(n.date)}__${normTk(n.ticker)}`; (notesByKey[key] = notesByKey[key] || []).push(n); });
     const tripIdxsByKey = {};
     trips.forEach((t, i) => { const key = `${normDate(t.date)}__${normTk(t.ticker)}`; (tripIdxsByKey[key] = tripIdxsByKey[key] || []).push(i); });
     const matchByIdx = {};
@@ -1698,9 +1772,9 @@ function ImportPanel({ existingTrades, onImport, pendingNotes, onDeleteNote }) {
       sortedIdxs.forEach((idx, i) => { if (notes[i]) matchByIdx[idx] = notes[i]; });
     });
     const withLocate = trips.map((t, i) => {
-      const locateCost = source === 'ct' ? (t.swap || 0) : (locateMap[`${t.date}__${t.ticker}`] || 0);
-      const finalPnl = source === 'ct' ? t.pnlFromProceeds : t.pnlFromProceeds - locateCost;
-      const isDup = existingTrades.some(e => e.date === t.date && e.ticker === t.ticker && Math.abs((e.entryPrice ?? -999) - (t.entryPrice ?? -998)) < 0.005 && (source !== 'ct' || Math.abs((e.exitPrice ?? -999) - (t.exitPrice ?? -998)) < 0.005));
+      const locateCost = source === 'ct' ? (t.swap || 0) : source === 'bt' ? 0 : (locateMap[`${t.date}__${t.ticker}`] || 0);
+      const finalPnl = (source === 'ct' || source === 'bt') ? t.pnlFromProceeds : t.pnlFromProceeds - locateCost;
+      const isDup = source === 'bt' ? existingTrades.some(e => isBT(e) && e.date === t.date && e.time === t.time && e.ticker === t.ticker && Math.abs((e.entryPrice ?? -999) - (t.entryPrice ?? -998)) < 0.005) : existingTrades.some(e => e.date === t.date && e.ticker === t.ticker && Math.abs((e.entryPrice ?? -999) - (t.entryPrice ?? -998)) < 0.005 && (source !== 'ct' || Math.abs((e.exitPrice ?? -999) - (t.exitPrice ?? -998)) < 0.005));
       const matchedNote = matchByIdx[i] || null;
       return { ...t, locateCost, finalPnl, isDup, matchedNoteId: matchedNote?.id ?? null, matchedNote };
     });
@@ -1708,7 +1782,7 @@ function ImportPanel({ existingTrades, onImport, pendingNotes, onDeleteNote }) {
     const initSel = {};
     withLocate.forEach((t, i) => { initSel[i] = !t.isDup; });
     setSelected(initSel);
-  }, [source, tradeRows, ctRows, locateMap, existingTrades, pendingNotes]);
+  }, [source, tradeRows, ctRows, btText, btStrategy, locateMap, existingTrades, pendingNotes]);
 
   const toggleSel = i => setSelected(s => ({ ...s, [i]: !s[i] }));
   const selectedCount = Object.values(selected).filter(Boolean).length;
@@ -1719,18 +1793,19 @@ function ImportPanel({ existingTrades, onImport, pendingNotes, onDeleteNote }) {
       if (t.matchedNote?.notes) parts.push(t.matchedNote.notes);
       if (t.openPosition) parts.push('Posizione aperta a fine file');
       return {
-        id: uuid(), date: t.date, ticker: t.ticker, tags: [source === 'ct' ? CT_TAG : TZ_TAG], side: t.side,
+        id: uuid(), date: t.date, ticker: t.ticker, tags: source === 'bt' ? [BT_TAG, 'BT · ' + t.strategy] : [source === 'ct' ? CT_TAG : TZ_TAG], side: t.side,
         entryPrice: t.entryPrice, exitPrice: t.exitPrice, time: t.time || null, pnl: t.finalPnl,
         locateCost: t.locateCost || 0, commission: t.commission || 0,
         size: t.qty != null ? t.qty : null, pips: t.pips != null ? t.pips : null,
+        ...(source === 'bt' ? { stopLoss: t.stopLoss, takeProfit: t.takeProfit } : {}),
         notes: parts.join(' · '),
-        journal: { ...(t.matchedNote?.journal || {}), ...(source === 'ct' ? { exitTime: t.exitTime, durationSec: t.durationSec } : {}) },
+        journal: { ...(t.matchedNote?.journal || {}), ...((source === 'ct' || source === 'bt') ? { exitTime: t.exitTime, durationSec: t.durationSec } : {}) },
         chartImage: t.matchedNote?.chartImage || null,
       };
     });
     const usedNoteIds = [...new Set(preview.filter((_, i) => selected[i]).map(t => t.matchedNoteId).filter(Boolean))];
     onImport(toImport, usedNoteIds);
-    setTradeRows(null); setCtRows(null); setPreview([]); setSelected({});
+    setTradeRows(null); setCtRows(null); setBtText(''); setBtStrategy(''); setPreview([]); setSelected({});
   };
 
   return (
@@ -1738,12 +1813,23 @@ function ImportPanel({ existingTrades, onImport, pendingNotes, onDeleteNote }) {
       <PendingNotesList notes={pendingNotes} onDelete={onDeleteNote} />
       <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: 18 }}>
         <div style={{ display: 'flex', gap: 8, marginBottom: 14, flexWrap: 'wrap' }}>
-          {[['tz', 'TradeZero'], ['ct', 'cTrader']].map(([v, l]) => (
+          {[['tz', 'TradeZero'], ['ct', 'cTrader'], ['bt', 'Backtest FX Replay']].map(([v, l]) => (
             <button key={v} onClick={() => { setSource(v); setError(''); setSelected({}); }} style={{ padding: '8px 18px', borderRadius: 6, cursor: 'pointer', fontSize: 14, fontWeight: 700, border: '1px solid ' + (source === v ? C.accent : C.border), background: source === v ? C.accent + '15' : C.card2, color: source === v ? C.accent : C.muted }}>{l}</button>
           ))}
         </div>
-        <div style={{ fontSize: 12, color: C.muted, textTransform: 'uppercase', letterSpacing: '.07em', marginBottom: 12, fontWeight: 700 }}>Carica file {source === 'ct' ? 'cTrader' : 'TradeZero'}</div>
-        {source === 'tz' ? (
+        <div style={{ fontSize: 12, color: C.muted, textTransform: 'uppercase', letterSpacing: '.07em', marginBottom: 12, fontWeight: 700 }}>{source === 'bt' ? 'Incolla i trade da FX Replay' : 'Carica file ' + (source === 'ct' ? 'cTrader' : 'TradeZero')}</div>
+        {source === 'bt' ? (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <textarea value={btText} onChange={e => setBtText(e.target.value)} rows={6}
+            placeholder="Apri la tabella dei trade di FX Replay, seleziona le righe (con le intestazioni), copia e incolla qui"
+            style={{ background: C.card2, border: `1px solid ${C.border}`, color: C.text, borderRadius: 6, padding: '9px 12px', fontSize: 12, fontFamily: 'monospace', width: '100%', resize: 'vertical', boxSizing: 'border-box' }} />
+          <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center' }}>
+            <input type="text" value={btStrategy} onChange={e => setBtStrategy(e.target.value)} placeholder="Nome strategia (vuoto = quello di FX Replay)"
+              style={{ background: C.card2, border: `1px solid ${C.border}`, color: C.text, borderRadius: 6, padding: '7px 11px', fontSize: 14, height: 36, fontFamily: 'inherit', minWidth: 280 }} />
+            <span style={{ fontSize: 13, color: C.muted }}>Importi in $ · orari FX Replay (UTC) convertiti in ora italiana · tag automatici "Backtest" + "BT · strategia"{preview.length > 0 ? ' · ' + preview.length + ' trade letti' : ''}</span>
+          </div>
+        </div>
+        ) : source === 'tz' ? (
         <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
           <label style={fileLabelStyle}>
             📄 TradeHistory.csv {tradeRows && `✓ (${tradeRows.length} righe)`}
@@ -1776,7 +1862,7 @@ function ImportPanel({ existingTrades, onImport, pendingNotes, onDeleteNote }) {
           <div style={{ maxHeight: 380, overflowY: 'auto' }}>
             <table style={{ width: '100%', fontSize: 13, fontFamily: 'monospace', borderCollapse: 'collapse' }}>
               <thead style={{ position: 'sticky', top: 0, background: C.card2 }}>
-                <tr>{['','Data','Ora','Ticker','Side','Entry','Exit','Qty', source === 'ct' ? 'Swap' : 'Locate','Comm','PnL netto','Nota',''].map(h => (<th key={h} style={{ padding: '8px 10px', textAlign: 'left', fontSize: 11, color: C.muted, textTransform: 'uppercase' }}>{h}</th>))}</tr>
+                <tr>{['','Data','Ora','Ticker','Side','Entry','Exit','Qty', source === 'ct' ? 'Swap' : source === 'bt' ? 'Costi' : 'Locate','Comm','PnL netto','Nota',''].map(h => (<th key={h} style={{ padding: '8px 10px', textAlign: 'left', fontSize: 11, color: C.muted, textTransform: 'uppercase' }}>{h}</th>))}</tr>
               </thead>
               <tbody>
                 {preview.map((t, i) => (
@@ -1788,8 +1874,8 @@ function ImportPanel({ existingTrades, onImport, pendingNotes, onDeleteNote }) {
                     </td>
                     <td style={{ padding: '7px 10px', color: C.text, fontWeight: 700 }}>{t.ticker}</td>
                     <td style={{ padding: '7px 10px', color: t.side === 'short' ? C.loss : C.profit }}>{t.side}</td>
-                    <td style={{ padding: '7px 10px' }}>{t.entryPrice?.toFixed(3) ?? '-'}</td>
-                    <td style={{ padding: '7px 10px' }}>{t.exitPrice?.toFixed(3) ?? '-'}</td>
+                    <td style={{ padding: '7px 10px' }}>{t.entryPrice?.toFixed(source === 'bt' ? 1 : 3) ?? '-'}</td>
+                    <td style={{ padding: '7px 10px' }}>{t.exitPrice?.toFixed(source === 'bt' ? 1 : 3) ?? '-'}</td>
                     <td style={{ padding: '7px 10px', color: C.muted }}>{t.qty}</td>
                     <td style={{ padding: '7px 10px', color: t.locateCost ? C.loss : C.muted }}>{t.locateCost ? `-${t.locateCost.toFixed(2)}` : '—'}</td>
                     <td style={{ padding: '7px 10px', color: t.commission ? C.loss : C.muted }}>{t.commission ? `-${t.commission.toFixed(2)}` : '—'}</td>
@@ -2048,13 +2134,15 @@ function ctTimeBucket(time) {
 }
 // sceglie la fascia giusta in base al conto
 function tradeTimeBucket(t) {
+  if (getTags(t).includes(BT_TAG)) return null;
   return getTags(t).includes(CT_TAG) ? ctTimeBucket(t.time) : timeBucket(t.time);
 }
 // mostra solo le fasce dei conti presenti nei trade filtrati
 function timeOrderFor(trades) {
   const ct = trades.some(t => getTags(t).includes(CT_TAG));
-  const tz = trades.some(t => !getTags(t).includes(CT_TAG));
-  return [...(tz || !ct ? TIME_ORDER : []), ...(ct ? CT_TIME_ORDER : [])];
+  const bt = trades.some(isBT);
+  const tz = trades.some(t => !getTags(t).includes(CT_TAG) && !isBT(t));
+  return [...(tz || (!ct && !bt) ? TIME_ORDER : []), ...(ct ? CT_TIME_ORDER : [])];
 }
 
 function TagsSection({ tagRows }) {
@@ -2088,6 +2176,17 @@ function TagsSection({ tagRows }) {
   );
 }
 
+const DUR_ORDER = ['< 1 min', '1 - 3 min', '3 - 10 min', '10 - 30 min', '> 30 min'];
+function durBucket(t) {
+  const d = t.journal && t.journal.durationSec;
+  if (typeof d !== 'number') return null;
+  if (d < 60) return DUR_ORDER[0];
+  if (d < 180) return DUR_ORDER[1];
+  if (d < 600) return DUR_ORDER[2];
+  if (d < 1800) return DUR_ORDER[3];
+  return DUR_ORDER[4];
+}
+
 function StrategyView({ trades }) {
   const tagRows = useMemo(() => groupByTags(trades), [trades]);
   const bySide = useMemo(() => groupStats(trades, t => t.side === 'short' ? 'Short' : t.side === 'long' ? 'Long' : null), [trades]);
@@ -2095,6 +2194,7 @@ function StrategyView({ trades }) {
   const byPrice = useMemo(() => groupStats(trades.filter(t => t.entryPrice != null), t => priceBucket(t.entryPrice), PRICE_ORDER), [trades]);
   const withTime = useMemo(() => trades.filter(t => t.time), [trades]);
   const byTime = useMemo(() => groupStats(withTime, tradeTimeBucket, timeOrderFor(withTime)), [trades]);
+  const byDur = useMemo(() => groupStats(trades, durBucket, DUR_ORDER), [trades]);
 
   if (trades.length === 0) return (
     <div style={{ background: C.card, border: `1px dashed ${C.border}`, borderRadius: 12, padding: 30, textAlign: 'center', color: C.muted, fontSize: 14 }}>Nessun trade da analizzare</div>
@@ -2114,7 +2214,8 @@ function StrategyView({ trades }) {
         </div>
         <BreakdownSection title="Giorno della settimana" rows={byWeekday} />
         <BreakdownSection title="Fascia di prezzo entry" rows={byPrice} note="Nessun entry price registrato" />
-        <BreakdownSection title="Fascia oraria" rows={byTime} note="Nessun orario registrato — aggiungilo nel form trade o dall'import TradeZero" />
+        {byTime.length > 0 && (<BreakdownSection title="Fascia oraria" rows={byTime} note="Nessun orario registrato — aggiungilo nel form trade o dall'import TradeZero" />)}
+        {byDur.some(r => r.n > 0) && (<BreakdownSection title="Durata del trade" rows={byDur} />)}
       </div>
     </div>
   );
@@ -2199,7 +2300,7 @@ function buildExportData(label, trades) {
       t.entryPrice != null ? r2(t.entryPrice) : '',
       t.exitPrice != null ? r2(t.exitPrice) : '',
       size != null ? r2(size) : '',
-      size != null ? (getTags(t).includes(CT_TAG) ? 'lotti' : 'azioni') : '',
+      size != null ? (getTags(t).includes(CT_TAG) ? 'lotti' : getTags(t).includes(BT_TAG) ? 'contratti' : 'azioni') : '',
       pips != null ? r2(pips) : '',
       r2(getLocateCost(t)), r2(getCommission(t)), r2(t.pnl),
       getTags(t).join(', '),
@@ -2241,7 +2342,9 @@ function buildAiPrompt(label, trades, reviews, reviewKeys, extra) {
   const cur = ctN === trades.length ? '€' : '$';
 
   let context;
-  if (ctN === 0) context = 'Opero short selling su small cap USA in gap-up (conto TradeZero, importi in $).';
+  const btN = trades.filter(isBT).length;
+  if (trades.length && btN === trades.length) context = 'Questi sono trade di BACKTEST manuale su FX Replay (strategie su CFD indici, importi in $), non trade reali: valuta la robustezza statistica del campione (numero di trade, distribuzione, durata, perdite rispetto ai profitti), non l\'esecuzione.';
+  else if (ctN === 0) context = 'Opero short selling su small cap USA in gap-up (conto TradeZero, importi in $).';
   else if (ctN === trades.length) context = 'Opero strategie su CFD indici e oro tramite cTrader (importi in €).';
   else context = 'Opero due conti: short selling su small cap USA in gap-up (TradeZero, $) e strategie su CFD indici e oro (cTrader, €). I trade con tag "' + CT_TAG + '" sono in €, tutti gli altri in $: analizza i due conti separatamente e non sommare le valute.';
 
@@ -2640,6 +2743,7 @@ function TradingJournal() {
       if (filters.dateFrom && t.date < filters.dateFrom) return false;
       if (filters.dateTo && t.date > filters.dateTo) return false;
       if (filters.tags && filters.tags.length && !filters.tags.some(tag => getTags(t).includes(tag))) return false;
+      if (!(filters.tags && filters.tags.length) && isBT(t)) return false;   // i backtest compaiono solo selezionando un tag
       if (filters.ticker && !t.ticker.includes(filters.ticker)) return false;
       if (filters.side) {
         const s = t.side === 'short' ? 'Short' : t.side === 'long' ? 'Long' : '';
@@ -2765,6 +2869,12 @@ function TradingJournal() {
           {tab !== 'import' && mixedCurrency && (
             <div style={{ background: C.yellow + '14', border: '1px solid ' + C.yellow + '55', borderRadius: 10, padding: '9px 14px', fontSize: 13, color: C.yellow }}>
               ⚠ Stai sommando conti in valute diverse ($ e €). Seleziona un Tag / Conto per statistiche corrette.
+            </div>
+          )}
+
+          {tab !== 'import' && filteredTrades.length > 0 && filteredTrades.some(isBT) && (
+            <div style={{ background: C.accent + '14', border: '1px solid ' + C.accent + '55', borderRadius: 10, padding: '9px 14px', fontSize: 13, color: C.accent }}>
+              🧪 Stai guardando trade di backtest (FX Replay), non trade reali.
             </div>
           )}
 
