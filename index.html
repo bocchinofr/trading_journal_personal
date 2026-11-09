@@ -327,8 +327,9 @@ function buildRoundTripsFromTradeHistory(rows) {
 const CT_TAG = 'Import cTrader';
 const TZ_TAG = 'Import TradeZero';
 const BT_TAG = 'Backtest';
-const isBT = t => getTags(t).includes(BT_TAG);
-function costLabel(t) { const g = getTags(t); return g.includes(CT_TAG) ? 'Swap' : g.includes(BT_TAG) ? 'Costi' : 'Locate'; }
+const TICKER_ALIAS = { DE30EUR: 'GER40' };   // nomi FX Replay/OANDA -> nome usato nel journal
+const isBT = t => t.backtest === true || getTags(t).includes(BT_TAG);
+function costLabel(t) { const g = getTags(t); return g.includes(CT_TAG) ? 'Swap' : isBT(t) ? 'Costi' : 'Locate'; }
 
 function parseLooseNumber(v) {
   let x = String(v == null ? '' : v).replace(/[\s\u00a0\u202f]/g, '').replace(/[^0-9,.\-]/g, '');
@@ -450,7 +451,7 @@ function parseFxReplayPaste(text, strategyOverride) {
     const points = Math.round((side === 'long' ? exitPrice - entryPrice : entryPrice - exitPrice) * 100) / 100;
     const e = utcToRome(entryMs), x = utcToRome(exitMs);
     out.push({
-      ticker: asset.split(':').pop().toUpperCase(),
+      ticker: (TICKER_ALIAS[asset.split(':').pop().toUpperCase()] || asset.split(':').pop().toUpperCase()),
       date: e.date, side, entryPrice, exitPrice,
       qty: parseLooseNumber(pre[1]),
       pnlFromProceeds: pnl, commission: fees, swap: 0,
@@ -508,7 +509,7 @@ function getPips(t) {
 function fmtSize(t) {
   const s = getSize(t);
   if (s == null) return '—';
-  if (getTags(t).includes(BT_TAG)) return (Math.round(s * 100) / 100) + ' ctr';
+  if (isBT(t)) return (Math.round(s * 100) / 100) + ' ctr';
   return getTags(t).includes(CT_TAG) ? (Math.round(s * 100) / 100) + ' lot' : Math.round(s).toLocaleString('it-IT') + ' sh';
 }
 function fmtPips(t) {
@@ -1793,11 +1794,11 @@ function ImportPanel({ existingTrades, onImport, pendingNotes, onDeleteNote }) {
       if (t.matchedNote?.notes) parts.push(t.matchedNote.notes);
       if (t.openPosition) parts.push('Posizione aperta a fine file');
       return {
-        id: uuid(), date: t.date, ticker: t.ticker, tags: source === 'bt' ? [BT_TAG, 'BT · ' + t.strategy] : [source === 'ct' ? CT_TAG : TZ_TAG], side: t.side,
+        id: uuid(), date: t.date, ticker: t.ticker, tags: source === 'bt' ? [t.strategy] : [source === 'ct' ? CT_TAG : TZ_TAG], side: t.side,
         entryPrice: t.entryPrice, exitPrice: t.exitPrice, time: t.time || null, pnl: t.finalPnl,
         locateCost: t.locateCost || 0, commission: t.commission || 0,
         size: t.qty != null ? t.qty : null, pips: t.pips != null ? t.pips : null,
-        ...(source === 'bt' ? { stopLoss: t.stopLoss, takeProfit: t.takeProfit } : {}),
+        ...(source === 'bt' ? { backtest: true, stopLoss: t.stopLoss, takeProfit: t.takeProfit } : {}),
         notes: parts.join(' · '),
         journal: { ...(t.matchedNote?.journal || {}), ...((source === 'ct' || source === 'bt') ? { exitTime: t.exitTime, durationSec: t.durationSec } : {}) },
         chartImage: t.matchedNote?.chartImage || null,
@@ -1826,7 +1827,7 @@ function ImportPanel({ existingTrades, onImport, pendingNotes, onDeleteNote }) {
           <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center' }}>
             <input type="text" value={btStrategy} onChange={e => setBtStrategy(e.target.value)} placeholder="Nome strategia (vuoto = quello di FX Replay)"
               style={{ background: C.card2, border: `1px solid ${C.border}`, color: C.text, borderRadius: 6, padding: '7px 11px', fontSize: 14, height: 36, fontFamily: 'inherit', minWidth: 280 }} />
-            <span style={{ fontSize: 13, color: C.muted }}>Importi in $ · orari FX Replay (UTC) convertiti in ora italiana · tag automatici "Backtest" + "BT · strategia"{preview.length > 0 ? ' · ' + preview.length + ' trade letti' : ''}</span>
+            <span style={{ fontSize: 13, color: C.muted }}>Importi in $ · orari FX Replay (UTC) convertiti in ora italiana · tag = nome strategia (i backtest restano separati dai trade reali finché non selezioni il tag){preview.length > 0 ? ' · ' + preview.length + ' trade letti' : ''}</span>
           </div>
         </div>
         ) : source === 'tz' ? (
@@ -2037,7 +2038,7 @@ function FilterBar({ trades, filters, setFilters }) {
           <MultiSelectDropdown label="Cosa è successo" options={EVENT_TAGS} selected={filters.eventTags || []} onChange={v => setFilters({ ...filters, eventTags: v })} width={190} placeholder="Tutti" />
           <MultiSelectDropdown label="Giorno" options={WEEKDAY_NAMES} selected={filters.weekdays || []} onChange={v => setFilters({ ...filters, weekdays: v })} width={150} placeholder="Tutti" />
           <MultiSelectDropdown label="Prezzo" options={PRICE_ORDER} selected={filters.priceBuckets || []} onChange={v => setFilters({ ...filters, priceBuckets: v })} width={150} placeholder="Tutte" />
-          <MultiSelectDropdown label="Orario" options={[...TIME_ORDER, ...CT_TIME_ORDER]} selected={filters.timeBuckets || []} onChange={v => setFilters({ ...filters, timeBuckets: v })} width={170} placeholder="Tutte" />
+          <MultiSelectDropdown label="Orario" options={[...TIME_ORDER, ...CT_TIME_ORDER, ...BT_TIME_ORDER]} selected={filters.timeBuckets || []} onChange={v => setFilters({ ...filters, timeBuckets: v })} width={170} placeholder="Tutte" />
         </div>
       )}
     </div>
@@ -2123,6 +2124,15 @@ function timeBucket(time) {
 }
 
 const CT_TIME_ORDER = ['08 - 10', '10 - 12', '12 - 15', '15 - 18', 'Fuori fascia'];
+const BT_TIME_ORDER = ['DAX 9:00 - 9:30', 'DAX 9:30 - 10:00', 'DAX altro orario'];
+function btTimeBucket(time) {
+  if (!time) return null;
+  const [h, m] = time.split(':').map(Number);
+  const mins = h * 60 + m;
+  if (mins >= 540 && mins < 570) return BT_TIME_ORDER[0];
+  if (mins >= 570 && mins < 600) return BT_TIME_ORDER[1];
+  return BT_TIME_ORDER[2];
+}
 function ctTimeBucket(time) {
   if (!time) return null;
   const h = Number(time.split(':')[0]);
@@ -2134,7 +2144,7 @@ function ctTimeBucket(time) {
 }
 // sceglie la fascia giusta in base al conto
 function tradeTimeBucket(t) {
-  if (getTags(t).includes(BT_TAG)) return null;
+  if (isBT(t)) return btTimeBucket(t.time);
   return getTags(t).includes(CT_TAG) ? ctTimeBucket(t.time) : timeBucket(t.time);
 }
 // mostra solo le fasce dei conti presenti nei trade filtrati
@@ -2142,7 +2152,7 @@ function timeOrderFor(trades) {
   const ct = trades.some(t => getTags(t).includes(CT_TAG));
   const bt = trades.some(isBT);
   const tz = trades.some(t => !getTags(t).includes(CT_TAG) && !isBT(t));
-  return [...(tz || (!ct && !bt) ? TIME_ORDER : []), ...(ct ? CT_TIME_ORDER : [])];
+  return [...(tz || (!ct && !bt) ? TIME_ORDER : []), ...(ct ? CT_TIME_ORDER : []), ...(bt ? BT_TIME_ORDER : [])];
 }
 
 function TagsSection({ tagRows }) {
@@ -2191,7 +2201,9 @@ function StrategyView({ trades }) {
   const tagRows = useMemo(() => groupByTags(trades), [trades]);
   const bySide = useMemo(() => groupStats(trades, t => t.side === 'short' ? 'Short' : t.side === 'long' ? 'Long' : null), [trades]);
   const byWeekday = useMemo(() => groupStats(trades, t => WEEKDAY_NAMES[(new Date(t.date + 'T00:00:00').getDay() + 6) % 7], WEEKDAY_NAMES), [trades]);
-  const byPrice = useMemo(() => groupStats(trades.filter(t => t.entryPrice != null), t => priceBucket(t.entryPrice), PRICE_ORDER), [trades]);
+  const isUsStock = t => !isBT(t) && !getTags(t).includes(CT_TAG);
+  const hasUsStocks = trades.some(isUsStock);
+  const byPrice = useMemo(() => groupStats(trades.filter(t => t.entryPrice != null && isUsStock(t)), t => priceBucket(t.entryPrice), PRICE_ORDER), [trades]);
   const withTime = useMemo(() => trades.filter(t => t.time), [trades]);
   const byTime = useMemo(() => groupStats(withTime, tradeTimeBucket, timeOrderFor(withTime)), [trades]);
   const byDur = useMemo(() => groupStats(trades, durBucket, DUR_ORDER), [trades]);
@@ -2213,7 +2225,7 @@ function StrategyView({ trades }) {
           <BreakdownSection title="Long vs Short" rows={bySide} note="Nessun side registrato sui trade" />
         </div>
         <BreakdownSection title="Giorno della settimana" rows={byWeekday} />
-        <BreakdownSection title="Fascia di prezzo entry" rows={byPrice} note="Nessun entry price registrato" />
+        {hasUsStocks && (<BreakdownSection title="Fascia di prezzo entry" rows={byPrice} note="Nessun entry price registrato" />)}
         {byTime.length > 0 && (<BreakdownSection title="Fascia oraria" rows={byTime} note="Nessun orario registrato — aggiungilo nel form trade o dall'import TradeZero" />)}
         {byDur.some(r => r.n > 0) && (<BreakdownSection title="Durata del trade" rows={byDur} />)}
       </div>
@@ -2300,7 +2312,7 @@ function buildExportData(label, trades) {
       t.entryPrice != null ? r2(t.entryPrice) : '',
       t.exitPrice != null ? r2(t.exitPrice) : '',
       size != null ? r2(size) : '',
-      size != null ? (getTags(t).includes(CT_TAG) ? 'lotti' : getTags(t).includes(BT_TAG) ? 'contratti' : 'azioni') : '',
+      size != null ? (getTags(t).includes(CT_TAG) ? 'lotti' : isBT(t) ? 'contratti' : 'azioni') : '',
       pips != null ? r2(pips) : '',
       r2(getLocateCost(t)), r2(getCommission(t)), r2(t.pnl),
       getTags(t).join(', '),
@@ -2777,7 +2789,16 @@ function TradingJournal() {
 
   useEffect(() => {
     Promise.all([dataStore.getTrades(), dataStore.getReviews(), dataStore.getPendingNotes(), dataStore.getTheme()]).then(([t, r, n, th]) => {
-      setTrades(t); setReviews(r); setPendingNotes(n); setTheme(th); setLoading(false);
+      const list = Array.isArray(t) ? t : [];
+      const migrated = list.map(x => {
+        if (x.backtest || !(x.tags || []).includes(BT_TAG)) return x;
+        const rest = x.tags.filter(g => g !== BT_TAG).map(g => g.startsWith('BT · ') ? g.slice(5) : g);
+        return { ...x, backtest: true, tags: rest };
+      });
+      const renamed = migrated.map(x => (isBT(x) && TICKER_ALIAS[x.ticker]) ? { ...x, ticker: TICKER_ALIAS[x.ticker] } : x);
+      const changed = renamed.some((x, i) => x !== list[i]);
+      setTrades(renamed); if (changed) dataStore.saveTrades(renamed);
+      setReviews(r); setPendingNotes(n); setTheme(th); setLoading(false);
     });
   }, []);
 
