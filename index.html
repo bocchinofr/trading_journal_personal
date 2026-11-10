@@ -1224,6 +1224,7 @@ function TradeLog({ trades, onUpdate, onDelete, onDuplicate, allTags = [], isDes
   const [tagsDraft, setTagsDraft] = useState([]);
   const [journalDraft, setJournalDraft] = useState({});
   const [chartImageDraft, setChartImageDraft] = useState(null);
+  const [dataDraft, setDataDraft] = useState(null);   // modifica dati base (solo backtest)
 
   const sorted = useMemo(() => [...trades].sort((a, b) => a.date.localeCompare(b.date)), [trades]);
   const equityCurve = useMemo(() => {
@@ -1253,6 +1254,45 @@ function TradeLog({ trades, onUpdate, onDelete, onDuplicate, allTags = [], isDes
     setTagsDraft(getTags(t));
     setJournalDraft(t.journal || {});
     setChartImageDraft(t.chartImage || null);
+    setDataDraft(null);
+  };
+
+  // ── Modifica dati di un trade di backtest ──
+  const num = v => { const x = Number(String(v ?? '').trim().replace(',', '.')); return String(v ?? '').trim() === '' || !isFinite(x) ? null : x; };
+  const openDataEdit = t => setDataDraft({
+    date: t.date || '', time: (t.time || '').slice(0, 8), exitTime: (t.journal?.exitTime || '').slice(0, 8),
+    ticker: t.ticker || '', side: t.side || 'long',
+    entryPrice: t.entryPrice != null ? String(t.entryPrice) : '', exitPrice: t.exitPrice != null ? String(t.exitPrice) : '',
+    size: getSize(t) != null ? String(getSize(t)) : '', commission: String(getCommission(t)), pnl: String(t.pnl),
+    stopLoss: t.stopLoss != null ? String(t.stopLoss) : '', takeProfit: t.takeProfit != null ? String(t.takeProfit) : '',
+  });
+  const setD = (k, v) => setDataDraft(d => ({ ...d, [k]: v }));
+  const secOf = x => { const m = /^(\d{2}):(\d{2})(?::(\d{2}))?$/.exec(x || ''); return m ? (+m[1]) * 3600 + (+m[2]) * 60 + (+(m[3] || 0)) : null; };
+  const pointsOf = (side, en, ex) => en == null || ex == null ? null : Math.round((side === 'long' ? ex - en : en - ex) * 100) / 100;
+  // ricalcola il PnL mantenendo il valore per punto/contratto implicito del trade originale
+  const recalcPnl = t => {
+    const oldPts = pointsOf(t.side, t.entryPrice, t.exitPrice), oldSize = getSize(t);
+    const newPts = pointsOf(dataDraft.side, num(dataDraft.entryPrice), num(dataDraft.exitPrice)), newSize = num(dataDraft.size);
+    if (!oldPts || !oldSize || newPts == null || newSize == null) { alert('Non posso ricalcolare: il trade originale ha 0 punti o manca la size. Inserisci il PnL a mano.'); return; }
+    const perPt = (t.pnl + getCommission(t)) / (oldPts * oldSize);
+    const comm = num(dataDraft.commission) || 0;
+    setD('pnl', String(Math.round((perPt * newPts * newSize - comm) * 100) / 100));
+  };
+  const saveData = t => {
+    const d = dataDraft;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(d.date)) { alert('Data non valida: usa il formato AAAA-MM-GG'); return; }
+    if (d.time && secOf(d.time) == null) { alert('Ora di entrata non valida: usa HH:MM o HH:MM:SS'); return; }
+    if (d.exitTime && secOf(d.exitTime) == null) { alert('Ora di uscita non valida: usa HH:MM o HH:MM:SS'); return; }
+    const en = num(d.entryPrice), ex = num(d.exitPrice), pnl = num(d.pnl);
+    if (!d.ticker.trim() || en == null || ex == null || pnl == null) { alert('Ticker, prezzo di entrata, prezzo di uscita e PnL sono obbligatori e devono essere numeri.'); return; }
+    let dur = t.journal?.durationSec;
+    if (d.time && d.exitTime) { dur = secOf(d.exitTime) - secOf(d.time); if (dur < 0) dur += 86400; }
+    const journal = { ...(t.journal || {}), exitTime: d.exitTime || null, durationSec: typeof dur === 'number' ? dur : null };
+    onUpdate({ ...t, date: d.date, time: d.time || null, ticker: d.ticker.trim().toUpperCase(), side: d.side,
+      entryPrice: en, exitPrice: ex, size: num(d.size), commission: num(d.commission) || 0, pnl,
+      pips: pointsOf(d.side, en, ex), stopLoss: num(d.stopLoss), takeProfit: num(d.takeProfit), journal });
+    setJournalDraft(j => ({ ...j, exitTime: journal.exitTime, durationSec: journal.durationSec }));
+    setDataDraft(null);
   };
 
   const saveNote = t => { onUpdate({ ...t, notes: noteDraft, tags: tagsDraft, journal: journalDraft, chartImage: chartImageDraft }); };
@@ -1352,6 +1392,37 @@ function TradeLog({ trades, onUpdate, onDelete, onDuplicate, allTags = [], isDes
                       <span style={{ color: C.muted }}>Comm <b style={{ color: commission > 0 ? C.loss : C.muted }}>-${commission.toFixed(2)}</b></span>
                     </div>
                   )}
+                  {dataDraft && isBT(t) && (() => {
+                    const inp = { background: C.card, border: `1px solid ${C.border}`, color: C.text, borderRadius: 6, padding: '7px 10px', fontSize: 14, fontFamily: 'monospace', width: '100%', boxSizing: 'border-box' };
+                    const F = (label, key, ph) => (<label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 11, color: C.muted, textTransform: 'uppercase', letterSpacing: '.05em', fontWeight: 700 }}>{label}<input type="text" value={dataDraft[key]} placeholder={ph || ''} onChange={e => setD(key, e.target.value)} style={inp} /></label>);
+                    return (
+                    <div style={{ marginBottom: 16, padding: 14, background: C.card, border: `1px solid ${C.accent}55`, borderRadius: 10 }}>
+                      <div style={{ fontSize: 13, color: C.accent, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: 10 }}>✏️ Modifica dati del backtest</div>
+                      <div style={{ display: 'grid', gridTemplateColumns: isDesktop ? 'repeat(4, 1fr)' : 'repeat(2, 1fr)', gap: 10 }}>
+                        {F('Data (AAAA-MM-GG)', 'date')}
+                        {F('Ora entrata', 'time', 'HH:MM:SS')}
+                        {F('Ora uscita', 'exitTime', 'HH:MM:SS')}
+                        {F('Ticker', 'ticker')}
+                        <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 11, color: C.muted, textTransform: 'uppercase', letterSpacing: '.05em', fontWeight: 700 }}>Direzione
+                          <select value={dataDraft.side} onChange={e => setD('side', e.target.value)} style={inp}><option value="long">LONG</option><option value="short">SHORT</option></select>
+                        </label>
+                        {F('Prezzo entrata', 'entryPrice')}
+                        {F('Prezzo uscita', 'exitPrice')}
+                        {F('Size (ctr)', 'size')}
+                        {F('Stop loss', 'stopLoss', '—')}
+                        {F('Take profit', 'takeProfit', '—')}
+                        {F('Costi / commissioni ($)', 'commission')}
+                        {F('PnL netto ($)', 'pnl')}
+                      </div>
+                      <div style={{ fontSize: 12, color: C.muted, marginTop: 10 }}>I pips si ricalcolano da soli da entrata/uscita e la durata dagli orari (orari in ora italiana). Il PnL non cambia da solo: modificalo a mano oppure usa “Ricalcola PnL”, che mantiene il valore per punto di questo trade.</div>
+                      <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
+                        <button onClick={() => saveData(t)} style={{ padding: '8px 18px', borderRadius: 6, border: 'none', background: C.accent, color: C.onAccent, fontWeight: 800, fontSize: 13, cursor: 'pointer' }}>Salva modifiche</button>
+                        <button onClick={() => recalcPnl(t)} style={{ padding: '8px 16px', borderRadius: 6, border: `1px solid ${C.border}`, background: 'transparent', color: C.text, fontWeight: 700, fontSize: 13, cursor: 'pointer' }}>↻ Ricalcola PnL</button>
+                        <button onClick={() => setDataDraft(null)} style={{ padding: '8px 16px', borderRadius: 6, border: `1px solid ${C.border}`, background: 'transparent', color: C.muted, fontWeight: 700, fontSize: 13, cursor: 'pointer' }}>Annulla</button>
+                      </div>
+                    </div>
+                    );
+                  })()}
                   <div style={{ display: 'grid', gridTemplateColumns: isDesktop ? '1fr 1fr' : '1fr', gap: isDesktop ? 20 : 14, alignItems: 'start' }}>
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
                       <ChartImageInput value={chartImageDraft} onChange={setChartImageDraft} small />
@@ -1368,6 +1439,7 @@ function TradeLog({ trades, onUpdate, onDelete, onDuplicate, allTags = [], isDes
                   </div>
                   <div style={{ display: 'flex', gap: 8, marginTop: 16, flexWrap: 'wrap' }}>
                     <button onClick={() => saveNote(t)} style={{ padding: '9px 18px', borderRadius: 6, border: 'none', background: C.accent, color: C.onAccent, fontWeight: 800, fontSize: 13, cursor: 'pointer' }}>Salva</button>
+                    {isBT(t) && <button onClick={() => dataDraft ? setDataDraft(null) : openDataEdit(t)} style={{ padding: '9px 18px', borderRadius: 6, border: `1px solid ${C.accent}66`, background: dataDraft ? C.accent + '15' : 'transparent', color: C.accent, fontWeight: 700, fontSize: 13, cursor: 'pointer' }}>✏️ Modifica dati</button>}
                     <button onClick={() => onDuplicate(t)} style={{ padding: '9px 18px', borderRadius: 6, border: `1px solid ${C.border}`, background: 'transparent', color: C.text, fontWeight: 700, fontSize: 13, cursor: 'pointer' }}>⧉ Duplica trade</button>
                     <button onClick={() => onDelete(t.id)} style={{ padding: '9px 18px', borderRadius: 6, border: `1px solid ${C.loss}55`, background: 'transparent', color: C.loss, fontWeight: 700, fontSize: 13, cursor: 'pointer' }}>Elimina trade</button>
                   </div>
