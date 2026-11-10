@@ -476,6 +476,20 @@ function btKey(t) {
   if (t == null || t.entryPrice == null || t.exitPrice == null) return null;   // senza prezzi non è confrontabile
   return [t.date, String(t.time || '').slice(0, 5), t.ticker, t.side, Number(t.entryPrice).toFixed(2), Number(t.exitPrice).toFixed(2)].join('|');
 }
+// mode 'exact': giorno+minuto+ticker+direzione+entrata+uscita · mode 'loose': giorno+ticker+direzione+entrata (ignora orario e uscita)
+function btKeyLoose(t) {
+  if (t == null || t.entryPrice == null) return null;
+  return [t.date, t.ticker, t.side, Number(t.entryPrice).toFixed(1)].join('|');
+}
+function groupBtDuplicates(trades, mode) {
+  const keyFn = mode === 'loose' ? btKeyLoose : btKey;
+  const richness = t => (t.notes ? 1 : 0) + (t.chartImage ? 1 : 0) + Object.values(t.journal || {}).filter(v => v != null && v !== '' && !(Array.isArray(v) && v.length === 0)).length;
+  const groups = {};
+  (trades || []).forEach(t => { if (!isBT(t)) return; const k = keyFn(t); if (k) (groups[k] = groups[k] || []).push(t); });
+  return Object.values(groups).filter(g => g.length > 1)
+    .map(g => [...g].sort((a, b) => richness(b) - richness(a)))   // il primo è quello da tenere (più note/screenshot/journal)
+    .sort((a, b) => (a[0].date + ' ' + (a[0].time || '')).localeCompare(b[0].date + ' ' + (b[0].time || '')));
+}
 function findBtDuplicates(trades) {
   const richness = t => (t.notes ? 1 : 0) + (t.chartImage ? 1 : 0) + Object.values(t.journal || {}).filter(v => v != null && v !== '' && !(Array.isArray(v) && v.length === 0)).length;
   const groups = {};
@@ -1756,8 +1770,13 @@ function ImportPanel({ existingTrades, onImport, onDeleteMany, pendingNotes, onD
   const [error, setError] = useState('');
   const [btText, setBtText] = useState('');
   const [btStrategy, setBtStrategy] = useState('');
-  const [dupUnchecked, setDupUnchecked] = useState({});
-  const btDups = useMemo(() => findBtDuplicates(existingTrades), [existingTrades]);
+  const [dupMode, setDupMode] = useState('exact');
+  const [btView, setBtView] = useState('dups');
+  const [btFilter, setBtFilter] = useState('');
+  const [btManageOpen, setBtManageOpen] = useState(true);
+  const [delSel, setDelSel] = useState({});
+  const btAll = useMemo(() => (existingTrades || []).filter(isBT), [existingTrades]);
+  const btGroups = useMemo(() => groupBtDuplicates(existingTrades, dupMode), [existingTrades, dupMode]);
 
   const handleFile = (file, kind) => {
     const reader = new FileReader();
@@ -1881,37 +1900,66 @@ function ImportPanel({ existingTrades, onImport, onDeleteMany, pendingNotes, onD
         {error && <div style={{ color: C.loss, fontSize: 13, marginTop: 8 }}>{error}</div>}
       </div>
 
-      {source === 'bt' && btDups.length > 0 && (() => {
-        const delIds = btDups.map(d => d.trade.id).filter(id => !dupUnchecked[id]);
+      {source === 'bt' && btAll.length > 0 && (() => {
+        const keepIds = new Set(), dupIds = new Set(), gOf = {};
+        btGroups.forEach((g, gi) => g.forEach((t, k) => { gOf[t.id] = gi + 1; (k === 0 ? keepIds : dupIds).add(t.id); }));
+        const q = btFilter.trim().toLowerCase();
+        const baseRows = btView === 'dups' ? btGroups.flat() : [...btAll].sort((a, b) => (a.date + ' ' + (a.time || '')).localeCompare(b.date + ' ' + (b.time || '')));
+        const rows = q ? baseRows.filter(t => (t.date + ' ' + t.ticker + ' ' + getTags(t).join(' ')).toLowerCase().includes(q)) : baseRows;
+        const selIds = btAll.filter(t => delSel[t.id]).map(t => t.id);
+        const pill = (active) => ({ padding: '5px 12px', borderRadius: 6, cursor: 'pointer', fontSize: 12, fontWeight: 700, border: '1px solid ' + (active ? C.accent : C.border), background: active ? C.accent + '15' : C.card2, color: active ? C.accent : C.muted });
         return (
-        <div style={{ background: C.card, border: `1px solid ${C.yellow}55`, borderRadius: 12, overflow: 'hidden' }}>
+        <div style={{ background: C.card, border: `1px solid ${dupIds.size ? C.yellow + '55' : C.border}`, borderRadius: 12, overflow: 'hidden' }}>
           <div style={{ padding: '12px 18px', background: C.card2, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
-            <span style={{ fontSize: 12, color: C.yellow, textTransform: 'uppercase', letterSpacing: '.07em', fontWeight: 700 }}>🧹 Duplicati nei backtest già salvati ({btDups.length}) · di ogni gruppo resta il trade con più note/screenshot</span>
-            <button onClick={() => { if (delIds.length && window.confirm('Eliminare ' + delIds.length + ' trade duplicati dai backtest? L\'operazione non si può annullare (consiglio: esporta prima il JSON).')) { onDeleteMany(delIds); setDupUnchecked({}); } }} disabled={delIds.length === 0}
-              style={{ padding: '7px 16px', borderRadius: 6, border: 'none', fontWeight: 800, fontSize: 13, background: delIds.length ? C.loss : C.border, color: delIds.length ? C.onAccent : C.muted, cursor: delIds.length ? 'pointer' : 'default' }}>Elimina {delIds.length} duplicati</button>
+            <span style={{ fontSize: 12, color: dupIds.size ? C.yellow : C.muted, textTransform: 'uppercase', letterSpacing: '.07em', fontWeight: 700 }}>🧹 Gestisci backtest salvati · {btAll.length} trade · {dupIds.size} sospetti duplicati</span>
+            <button onClick={() => setBtManageOpen(o => !o)} style={pill(false)}>{btManageOpen ? 'Nascondi' : 'Mostra'}</button>
           </div>
-          <div style={{ maxHeight: 260, overflowY: 'auto' }}>
-            <table style={{ width: '100%', fontSize: 13, fontFamily: 'monospace', borderCollapse: 'collapse' }}>
-              <thead style={{ position: 'sticky', top: 0, background: C.card2 }}>
-                <tr>{['', 'Data', 'Ora', 'Ticker', 'Side', 'Entry', 'Exit', 'PnL', 'Strategia'].map(h => (<th key={h} style={{ padding: '8px 10px', textAlign: 'left', fontSize: 11, color: C.muted, textTransform: 'uppercase' }}>{h}</th>))}</tr>
-              </thead>
-              <tbody>
-                {btDups.map(({ trade: d }) => (
-                  <tr key={d.id} style={{ borderTop: `1px solid ${C.border}` }}>
-                    <td style={{ padding: '7px 10px' }}><input type="checkbox" checked={!dupUnchecked[d.id]} onChange={() => setDupUnchecked(u => ({ ...u, [d.id]: !u[d.id] }))} /></td>
-                    <td style={{ padding: '7px 10px', color: C.muted }}>{d.date}</td>
-                    <td style={{ padding: '7px 10px', color: C.muted }}>{d.time ? d.time.slice(0, 8) : '—'}</td>
-                    <td style={{ padding: '7px 10px', color: C.text, fontWeight: 700 }}>{d.ticker}</td>
-                    <td style={{ padding: '7px 10px', color: d.side === 'short' ? C.loss : C.profit }}>{d.side}</td>
-                    <td style={{ padding: '7px 10px' }}>{d.entryPrice?.toFixed(1) ?? '-'}</td>
-                    <td style={{ padding: '7px 10px' }}>{d.exitPrice?.toFixed(1) ?? '-'}</td>
-                    <td style={{ padding: '7px 10px', fontWeight: 700, color: (d.pnl || 0) >= 0 ? C.profit : C.loss }}>{fmt$(d.pnl || 0)}</td>
-                    <td style={{ padding: '7px 10px', color: C.muted }}>{getTags(d).join(', ') || '—'}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          {btManageOpen && (
+          <div style={{ padding: 14, display: 'flex', flexDirection: 'column', gap: 10 }}>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+              <button onClick={() => setBtView('dups')} style={pill(btView === 'dups')}>Solo duplicati</button>
+              <button onClick={() => setBtView('all')} style={pill(btView === 'all')}>Tutti i backtest</button>
+              <span style={{ color: C.muted, fontSize: 12 }}>Ricerca duplicati:</span>
+              <button onClick={() => setDupMode('exact')} style={pill(dupMode === 'exact')} title="Stesso giorno, minuto, ticker, direzione, entrata e uscita">Esatta</button>
+              <button onClick={() => setDupMode('loose')} style={pill(dupMode === 'loose')} title="Stesso giorno, ticker, direzione e prezzo d'entrata: ignora orario e uscita">Larga</button>
+              <input type="text" value={btFilter} onChange={e => setBtFilter(e.target.value)} placeholder="Filtra per data / ticker / strategia" style={{ background: C.card2, border: `1px solid ${C.border}`, color: C.text, borderRadius: 6, padding: '5px 10px', fontSize: 13, minWidth: 220 }} />
+            </div>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+              <button onClick={() => setDelSel(Object.fromEntries([...dupIds].map(id => [id, true])))} disabled={dupIds.size === 0} style={pill(false)}>Seleziona i {dupIds.size} duplicati</button>
+              <button onClick={() => setDelSel(Object.fromEntries(rows.map(t => [t.id, true])))} style={pill(false)}>Seleziona righe visibili</button>
+              <button onClick={() => setDelSel({})} style={pill(false)}>Deseleziona tutto</button>
+              <button onClick={() => { if (selIds.length && window.confirm('Eliminare ' + selIds.length + ' trade di backtest? L\'operazione non si può annullare (consiglio: esporta prima il JSON).')) { onDeleteMany(selIds); setDelSel({}); } }} disabled={selIds.length === 0}
+                style={{ marginLeft: 'auto', padding: '7px 16px', borderRadius: 6, border: 'none', fontWeight: 800, fontSize: 13, background: selIds.length ? C.loss : C.border, color: selIds.length ? C.onAccent : C.muted, cursor: selIds.length ? 'pointer' : 'default' }}>Elimina {selIds.length} selezionati</button>
+            </div>
+            <div style={{ fontSize: 12, color: C.muted }}>Di ogni gruppo di duplicati il trade con più note/screenshot/journal è marcato “tiene”: non viene selezionato automaticamente. Controlla le righe prima di eliminare.</div>
+            {rows.length === 0 && <div style={{ fontSize: 13, color: C.muted }}>{btView === 'dups' ? 'Nessun duplicato trovato con la ricerca ' + (dupMode === 'exact' ? 'esatta: prova “Larga” oppure “Tutti i backtest” per sceglierli a mano.' : 'larga.') : 'Nessun trade corrisponde al filtro.'}</div>}
+            {rows.length > 0 && (
+            <div style={{ maxHeight: 360, overflowY: 'auto', border: `1px solid ${C.border}`, borderRadius: 8 }}>
+              <table style={{ width: '100%', fontSize: 13, fontFamily: 'monospace', borderCollapse: 'collapse' }}>
+                <thead style={{ position: 'sticky', top: 0, background: C.card2 }}>
+                  <tr>{['', 'Gruppo', 'Data', 'Ora', 'Ticker', 'Side', 'Entry', 'Exit', 'PnL', 'Strategia'].map(h => (<th key={h} style={{ padding: '8px 10px', textAlign: 'left', fontSize: 11, color: C.muted, textTransform: 'uppercase' }}>{h}</th>))}</tr>
+                </thead>
+                <tbody>
+                  {rows.map(d => (
+                    <tr key={d.id} style={{ borderTop: `1px solid ${C.border}`, background: dupIds.has(d.id) ? 'rgba(232,196,104,0.06)' : 'transparent' }}>
+                      <td style={{ padding: '7px 10px' }}><input type="checkbox" checked={!!delSel[d.id]} onChange={() => setDelSel(u => ({ ...u, [d.id]: !u[d.id] }))} /></td>
+                      <td style={{ padding: '7px 10px', fontSize: 11, whiteSpace: 'nowrap', color: keepIds.has(d.id) ? C.profit : dupIds.has(d.id) ? C.yellow : C.muted }}>{gOf[d.id] ? '#' + gOf[d.id] + (keepIds.has(d.id) ? ' tiene' : ' dup') : '—'}</td>
+                      <td style={{ padding: '7px 10px', color: C.muted }}>{d.date}</td>
+                      <td style={{ padding: '7px 10px', color: C.muted }}>{d.time ? d.time.slice(0, 8) : '—'}</td>
+                      <td style={{ padding: '7px 10px', color: C.text, fontWeight: 700 }}>{d.ticker}</td>
+                      <td style={{ padding: '7px 10px', color: d.side === 'short' ? C.loss : C.profit }}>{d.side}</td>
+                      <td style={{ padding: '7px 10px' }}>{d.entryPrice?.toFixed(1) ?? '-'}</td>
+                      <td style={{ padding: '7px 10px' }}>{d.exitPrice?.toFixed(1) ?? '-'}</td>
+                      <td style={{ padding: '7px 10px', fontWeight: 700, color: (d.pnl || 0) >= 0 ? C.profit : C.loss }}>{fmt$(d.pnl || 0)}</td>
+                      <td style={{ padding: '7px 10px', color: C.muted }}>{getTags(d).join(', ') || '—'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            )}
           </div>
+          )}
         </div>
         );
       })()}
