@@ -468,6 +468,27 @@ function parseFxReplayPaste(text, strategyOverride) {
   return out.sort((a, b) => a._ms - b._ms);
 }
 
+// ─────────────────────────────────────────────────────────────
+// DUPLICATI BACKTEST: stessa chiave = stesso trade
+// giorno + minuto + ticker + direzione + prezzo di entrata + prezzo di uscita
+// ─────────────────────────────────────────────────────────────
+function btKey(t) {
+  if (t == null || t.entryPrice == null || t.exitPrice == null) return null;   // senza prezzi non è confrontabile
+  return [t.date, String(t.time || '').slice(0, 5), t.ticker, t.side, Number(t.entryPrice).toFixed(2), Number(t.exitPrice).toFixed(2)].join('|');
+}
+function findBtDuplicates(trades) {
+  const richness = t => (t.notes ? 1 : 0) + (t.chartImage ? 1 : 0) + Object.values(t.journal || {}).filter(v => v != null && v !== '' && !(Array.isArray(v) && v.length === 0)).length;
+  const groups = {};
+  (trades || []).forEach(t => { if (!isBT(t)) return; const k = btKey(t); if (k) (groups[k] = groups[k] || []).push(t); });
+  const out = [];
+  Object.values(groups).forEach(g => {
+    if (g.length < 2) return;
+    const sorted = [...g].sort((a, b) => richness(b) - richness(a));   // tiene quello con più note/screenshot/journal (a parità, il primo inserito)
+    sorted.slice(1).forEach(d => out.push({ trade: d, keep: sorted[0] }));
+  });
+  return out.sort((a, b) => (a.trade.date + ' ' + (a.trade.time || '')).localeCompare(b.trade.date + ' ' + (b.trade.time || '')));
+}
+
 function buildLocateCostMap(rows) {
   const map = {};
   rows.forEach(r => {
@@ -1724,7 +1745,7 @@ const normDate = s => String(s || '').slice(0, 10);
 // ════════════════════════════════════════════════════════════
 // IMPORT
 // ════════════════════════════════════════════════════════════
-function ImportPanel({ existingTrades, onImport, pendingNotes, onDeleteNote }) {
+function ImportPanel({ existingTrades, onImport, onDeleteMany, pendingNotes, onDeleteNote }) {
   const [source, setSource] = useState('tz');
   const [tradeRows, setTradeRows] = useState(null);
   const [ctRows, setCtRows] = useState(null);
@@ -1735,6 +1756,8 @@ function ImportPanel({ existingTrades, onImport, pendingNotes, onDeleteNote }) {
   const [error, setError] = useState('');
   const [btText, setBtText] = useState('');
   const [btStrategy, setBtStrategy] = useState('');
+  const [dupUnchecked, setDupUnchecked] = useState({});
+  const btDups = useMemo(() => findBtDuplicates(existingTrades), [existingTrades]);
 
   const handleFile = (file, kind) => {
     const reader = new FileReader();
@@ -1772,12 +1795,16 @@ function ImportPanel({ existingTrades, onImport, pendingNotes, onDeleteNote }) {
       });
       sortedIdxs.forEach((idx, i) => { if (notes[i]) matchByIdx[idx] = notes[i]; });
     });
+    const btExisting = new Set(existingTrades.filter(isBT).map(btKey).filter(Boolean));
+    const btSeen = new Set();
     const withLocate = trips.map((t, i) => {
       const locateCost = source === 'ct' ? (t.swap || 0) : source === 'bt' ? 0 : (locateMap[`${t.date}__${t.ticker}`] || 0);
       const finalPnl = (source === 'ct' || source === 'bt') ? t.pnlFromProceeds : t.pnlFromProceeds - locateCost;
-      const isDup = source === 'bt' ? existingTrades.some(e => isBT(e) && e.date === t.date && e.time === t.time && e.ticker === t.ticker && Math.abs((e.entryPrice ?? -999) - (t.entryPrice ?? -998)) < 0.005) : existingTrades.some(e => e.date === t.date && e.ticker === t.ticker && Math.abs((e.entryPrice ?? -999) - (t.entryPrice ?? -998)) < 0.005 && (source !== 'ct' || Math.abs((e.exitPrice ?? -999) - (t.exitPrice ?? -998)) < 0.005));
+      let isDup = source === 'bt' ? existingTrades.some(e => isBT(e) && e.date === t.date && e.time === t.time && e.ticker === t.ticker && Math.abs((e.entryPrice ?? -999) - (t.entryPrice ?? -998)) < 0.005) : existingTrades.some(e => e.date === t.date && e.ticker === t.ticker && Math.abs((e.entryPrice ?? -999) - (t.entryPrice ?? -998)) < 0.005 && (source !== 'ct' || Math.abs((e.exitPrice ?? -999) - (t.exitPrice ?? -998)) < 0.005));
+      let dupInPaste = false;
+      if (source === 'bt') { const k = btKey(t); if (k) { if (btExisting.has(k)) isDup = true; else if (btSeen.has(k)) { isDup = true; dupInPaste = true; } btSeen.add(k); } }
       const matchedNote = matchByIdx[i] || null;
-      return { ...t, locateCost, finalPnl, isDup, matchedNoteId: matchedNote?.id ?? null, matchedNote };
+      return { ...t, locateCost, finalPnl, isDup, dupInPaste, matchedNoteId: matchedNote?.id ?? null, matchedNote };
     });
     setPreview(withLocate);
     const initSel = {};
@@ -1786,10 +1813,10 @@ function ImportPanel({ existingTrades, onImport, pendingNotes, onDeleteNote }) {
   }, [source, tradeRows, ctRows, btText, btStrategy, locateMap, existingTrades, pendingNotes]);
 
   const toggleSel = i => setSelected(s => ({ ...s, [i]: !s[i] }));
-  const selectedCount = Object.values(selected).filter(Boolean).length;
+  const selectedCount = preview.filter((t, i) => selected[i] && !(source === 'bt' && t.isDup)).length;
 
   const doImport = () => {
-    const toImport = preview.filter((_, i) => selected[i]).map(t => {
+    const toImport = preview.filter((t, i) => selected[i] && !(source === 'bt' && t.isDup)).map(t => {
       const parts = [];
       if (t.matchedNote?.notes) parts.push(t.matchedNote.notes);
       if (t.openPosition) parts.push('Posizione aperta a fine file');
@@ -1804,7 +1831,7 @@ function ImportPanel({ existingTrades, onImport, pendingNotes, onDeleteNote }) {
         chartImage: t.matchedNote?.chartImage || null,
       };
     });
-    const usedNoteIds = [...new Set(preview.filter((_, i) => selected[i]).map(t => t.matchedNoteId).filter(Boolean))];
+    const usedNoteIds = [...new Set(preview.filter((t, i) => selected[i] && !(source === 'bt' && t.isDup)).map(t => t.matchedNoteId).filter(Boolean))];
     onImport(toImport, usedNoteIds);
     setTradeRows(null); setCtRows(null); setBtText(''); setBtStrategy(''); setPreview([]); setSelected({});
   };
@@ -1854,6 +1881,41 @@ function ImportPanel({ existingTrades, onImport, pendingNotes, onDeleteNote }) {
         {error && <div style={{ color: C.loss, fontSize: 13, marginTop: 8 }}>{error}</div>}
       </div>
 
+      {source === 'bt' && btDups.length > 0 && (() => {
+        const delIds = btDups.map(d => d.trade.id).filter(id => !dupUnchecked[id]);
+        return (
+        <div style={{ background: C.card, border: `1px solid ${C.yellow}55`, borderRadius: 12, overflow: 'hidden' }}>
+          <div style={{ padding: '12px 18px', background: C.card2, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+            <span style={{ fontSize: 12, color: C.yellow, textTransform: 'uppercase', letterSpacing: '.07em', fontWeight: 700 }}>🧹 Duplicati nei backtest già salvati ({btDups.length}) · di ogni gruppo resta il trade con più note/screenshot</span>
+            <button onClick={() => { if (delIds.length && window.confirm('Eliminare ' + delIds.length + ' trade duplicati dai backtest? L\'operazione non si può annullare (consiglio: esporta prima il JSON).')) { onDeleteMany(delIds); setDupUnchecked({}); } }} disabled={delIds.length === 0}
+              style={{ padding: '7px 16px', borderRadius: 6, border: 'none', fontWeight: 800, fontSize: 13, background: delIds.length ? C.loss : C.border, color: delIds.length ? C.onAccent : C.muted, cursor: delIds.length ? 'pointer' : 'default' }}>Elimina {delIds.length} duplicati</button>
+          </div>
+          <div style={{ maxHeight: 260, overflowY: 'auto' }}>
+            <table style={{ width: '100%', fontSize: 13, fontFamily: 'monospace', borderCollapse: 'collapse' }}>
+              <thead style={{ position: 'sticky', top: 0, background: C.card2 }}>
+                <tr>{['', 'Data', 'Ora', 'Ticker', 'Side', 'Entry', 'Exit', 'PnL', 'Strategia'].map(h => (<th key={h} style={{ padding: '8px 10px', textAlign: 'left', fontSize: 11, color: C.muted, textTransform: 'uppercase' }}>{h}</th>))}</tr>
+              </thead>
+              <tbody>
+                {btDups.map(({ trade: d }) => (
+                  <tr key={d.id} style={{ borderTop: `1px solid ${C.border}` }}>
+                    <td style={{ padding: '7px 10px' }}><input type="checkbox" checked={!dupUnchecked[d.id]} onChange={() => setDupUnchecked(u => ({ ...u, [d.id]: !u[d.id] }))} /></td>
+                    <td style={{ padding: '7px 10px', color: C.muted }}>{d.date}</td>
+                    <td style={{ padding: '7px 10px', color: C.muted }}>{d.time ? d.time.slice(0, 8) : '—'}</td>
+                    <td style={{ padding: '7px 10px', color: C.text, fontWeight: 700 }}>{d.ticker}</td>
+                    <td style={{ padding: '7px 10px', color: d.side === 'short' ? C.loss : C.profit }}>{d.side}</td>
+                    <td style={{ padding: '7px 10px' }}>{d.entryPrice?.toFixed(1) ?? '-'}</td>
+                    <td style={{ padding: '7px 10px' }}>{d.exitPrice?.toFixed(1) ?? '-'}</td>
+                    <td style={{ padding: '7px 10px', fontWeight: 700, color: (d.pnl || 0) >= 0 ? C.profit : C.loss }}>{fmt$(d.pnl || 0)}</td>
+                    <td style={{ padding: '7px 10px', color: C.muted }}>{getTags(d).join(', ') || '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+        );
+      })()}
+
       {preview.length > 0 && (
         <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, overflow: 'hidden' }}>
           <div style={{ padding: '12px 18px', background: C.card2, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -1868,7 +1930,7 @@ function ImportPanel({ existingTrades, onImport, pendingNotes, onDeleteNote }) {
               <tbody>
                 {preview.map((t, i) => (
                   <tr key={i} style={{ borderTop: `1px solid ${C.border}`, background: t.isDup ? 'rgba(232,196,104,0.06)' : 'transparent' }}>
-                    <td style={{ padding: '7px 10px' }}><input type="checkbox" checked={!!selected[i]} onChange={() => toggleSel(i)} /></td>
+                    <td style={{ padding: '7px 10px' }}><input type="checkbox" checked={!!selected[i] && !(source === 'bt' && t.isDup)} disabled={source === 'bt' && t.isDup} title={source === 'bt' && t.isDup ? 'Duplicato: non verrà importato' : ''} onChange={() => toggleSel(i)} /></td>
                     <td style={{ padding: '7px 10px', color: C.muted }}>{t.date}</td>
                     <td style={{ padding: '7px 10px', color: C.muted, whiteSpace: 'nowrap' }}>
                       {t.time ? t.time.slice(0,5) : '—'}{t.exitTime ? ' → ' + t.exitTime.slice(0,5) : ''}{t.durationSec != null ? ' · ' + fmtDur(t.durationSec) : ''}
@@ -1894,7 +1956,7 @@ function ImportPanel({ existingTrades, onImport, pendingNotes, onDeleteNote }) {
                       </select>
                     </td>
                     <td style={{ padding: '7px 10px', fontSize: 11 }}>
-                      {t.isDup && <span style={{ color: C.yellow }}>⚠ dup</span>}
+                      {t.isDup && <span style={{ color: C.yellow }}>{t.dupInPaste ? '⚠ dup (ripetuto nel testo)' : '⚠ dup'}</span>}
                       {t.openPosition && <span style={{ color: C.accent }}>⏳ aperta</span>}
                     </td>
                   </tr>
@@ -2808,6 +2870,7 @@ function TradingJournal() {
   const addTrade = useCallback(async (trade) => { const updated = [...trades, trade]; setTrades(updated); await dataStore.saveTrades(updated); }, [trades]);
   const updateTrade = useCallback(async (trade) => { const updated = trades.map(t => t.id === trade.id ? trade : t); setTrades(updated); await dataStore.saveTrades(updated); }, [trades]);
   const deleteTrade = useCallback(async (id) => { const updated = trades.filter(t => t.id !== id); setTrades(updated); await dataStore.saveTrades(updated); }, [trades]);
+  const deleteTrades = useCallback(async (ids) => { const set = new Set(ids); const updated = trades.filter(t => !set.has(t.id)); setTrades(updated); await dataStore.saveTrades(updated); }, [trades]);
   const duplicateTrade = useCallback(async (trade) => { const copy = { ...trade, id: uuid() }; const updated = [...trades, copy]; setTrades(updated); await dataStore.saveTrades(updated); }, [trades]);
 
   const allTags = useMemo(() => {
@@ -2817,7 +2880,9 @@ function TradingJournal() {
   }, [trades]);
 
   const importTrades = useCallback(async (newTrades, usedNoteIds = []) => {
-    const updated = [...trades, ...newTrades];
+    const seenBt = new Set(trades.filter(isBT).map(btKey).filter(Boolean));
+    const fresh = newTrades.filter(t => { if (!isBT(t)) return true; const k = btKey(t); if (!k) return true; if (seenBt.has(k)) return false; seenBt.add(k); return true; });   // ultima barriera anti-duplicati backtest
+    const updated = [...trades, ...fresh];
     setTrades(updated);
     await dataStore.saveTrades(updated);
     if (usedNoteIds.length) {
@@ -2936,7 +3001,7 @@ function TradingJournal() {
           {tab === 'review' && (<WeeklyReview trades={filteredTrades} reviews={reviews} onSaveReview={saveReview} isDesktop={isDesktop} />)}
           {tab === 'strategy' && (<StrategyView trades={filteredTrades} />)}
           {tab === 'report' && (<ReportPanel trades={filteredTrades} reviews={reviews} />)}
-          {tab === 'import' && (<ImportPanel existingTrades={trades} onImport={importTrades} pendingNotes={pendingNotes} onDeleteNote={deletePendingNote} />)}
+          {tab === 'import' && (<ImportPanel existingTrades={trades} onImport={importTrades} onDeleteMany={deleteTrades} pendingNotes={pendingNotes} onDeleteNote={deletePendingNote} />)}
 
         </div>
       </div>
