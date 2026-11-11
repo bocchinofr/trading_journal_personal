@@ -124,19 +124,22 @@ function tradeToRow(t) {
     id: t.id, date: t.date, ticker: t.ticker, side: t.side,
     entry_price: t.entryPrice, exit_price: t.exitPrice, time: t.time,
     pnl: t.pnl, locate_cost: t.locateCost || 0, commission: t.commission || 0,
-    tags: t.tags || [], notes: t.notes || '', journal: t.journal || {},
+    tags: t.tags || [], notes: t.notes || '',
+    journal: t.backtest ? { ...(t.journal || {}), __bt: { sl: t.stopLoss ?? null, tp: t.takeProfit ?? null } } : (t.journal || {}),   // il flag backtest vive nel JSON del journal (nessuna colonna nuova)
     chart_image: t.chartImage || null,
     size: t.size != null ? t.size : null, pips: t.pips != null ? t.pips : null,
   };
 }
 function rowToTrade(r) {
+  const { __bt, ...journal } = r.journal || {};
   return {
     id: r.id, date: r.date, ticker: r.ticker, side: r.side,
     entryPrice: r.entry_price, exitPrice: r.exit_price, time: r.time,
     pnl: r.pnl, locateCost: r.locate_cost, commission: r.commission,
-    tags: r.tags || [], notes: r.notes, journal: r.journal || {},
+    tags: r.tags || [], notes: r.notes, journal,
     chartImage: r.chart_image,
     size: r.size, pips: r.pips,
+    ...(__bt ? { backtest: true, stopLoss: __bt.sl ?? null, takeProfit: __bt.tp ?? null } : {}),
   };
 }
 function noteToRow(n) {
@@ -1419,6 +1422,7 @@ function TradeLog({ trades, onUpdate, onDelete, onDuplicate, allTags = [], isDes
                         <button onClick={() => saveData(t)} style={{ padding: '8px 18px', borderRadius: 6, border: 'none', background: C.accent, color: C.onAccent, fontWeight: 800, fontSize: 13, cursor: 'pointer' }}>Salva modifiche</button>
                         <button onClick={() => recalcPnl(t)} style={{ padding: '8px 16px', borderRadius: 6, border: `1px solid ${C.border}`, background: 'transparent', color: C.text, fontWeight: 700, fontSize: 13, cursor: 'pointer' }}>↻ Ricalcola PnL</button>
                         <button onClick={() => setDataDraft(null)} style={{ padding: '8px 16px', borderRadius: 6, border: `1px solid ${C.border}`, background: 'transparent', color: C.muted, fontWeight: 700, fontSize: 13, cursor: 'pointer' }}>Annulla</button>
+                        <button onClick={() => { if (window.confirm('Togliere il flag backtest da questo trade? Tornerà a essere trattato come trade reale.')) { onUpdate({ ...t, backtest: false, tags: getTags(t).filter(x => x !== BT_TAG) }); setDataDraft(null); } }} style={{ marginLeft: 'auto', padding: '8px 16px', borderRadius: 6, border: `1px solid ${C.loss}55`, background: 'transparent', color: C.loss, fontWeight: 700, fontSize: 13, cursor: 'pointer' }}>Togli flag backtest</button>
                       </div>
                     </div>
                     );
@@ -1439,6 +1443,7 @@ function TradeLog({ trades, onUpdate, onDelete, onDuplicate, allTags = [], isDes
                   </div>
                   <div style={{ display: 'flex', gap: 8, marginTop: 16, flexWrap: 'wrap' }}>
                     <button onClick={() => saveNote(t)} style={{ padding: '9px 18px', borderRadius: 6, border: 'none', background: C.accent, color: C.onAccent, fontWeight: 800, fontSize: 13, cursor: 'pointer' }}>Salva</button>
+                    {!isBT(t) && <button onClick={() => { if (window.confirm('Segnare questo trade come BACKTEST?\n\n• i costi saranno mostrati come "Costi" e la size in contratti\n• comparirà solo selezionando un tag (come gli altri backtest)\n• potrai modificarne i dati con "Modifica dati"\n\nSe cambi idea puoi togliere il flag dal pannello di modifica.')) onUpdate({ ...t, backtest: true }); }} style={{ padding: '9px 18px', borderRadius: 6, border: `1px solid ${C.accent}66`, background: 'transparent', color: C.accent, fontWeight: 700, fontSize: 13, cursor: 'pointer' }} title="Questo trade non è marcato come backtest: marcandolo si sblocca la modifica dei dati">🧪 Segna come backtest</button>}
                     {isBT(t) && <button onClick={() => dataDraft ? setDataDraft(null) : openDataEdit(t)} style={{ padding: '9px 18px', borderRadius: 6, border: `1px solid ${C.accent}66`, background: dataDraft ? C.accent + '15' : 'transparent', color: C.accent, fontWeight: 700, fontSize: 13, cursor: 'pointer' }}>✏️ Modifica dati</button>}
                     <button onClick={() => onDuplicate(t)} style={{ padding: '9px 18px', borderRadius: 6, border: `1px solid ${C.border}`, background: 'transparent', color: C.text, fontWeight: 700, fontSize: 13, cursor: 'pointer' }}>⧉ Duplica trade</button>
                     <button onClick={() => onDelete(t.id)} style={{ padding: '9px 18px', borderRadius: 6, border: `1px solid ${C.loss}55`, background: 'transparent', color: C.loss, fontWeight: 700, fontSize: 13, cursor: 'pointer' }}>Elimina trade</button>
@@ -1831,7 +1836,7 @@ const normDate = s => String(s || '').slice(0, 10);
 // ════════════════════════════════════════════════════════════
 // IMPORT
 // ════════════════════════════════════════════════════════════
-function ImportPanel({ existingTrades, onImport, onDeleteMany, pendingNotes, onDeleteNote }) {
+function ImportPanel({ existingTrades, onImport, onDeleteMany, onMarkBt, pendingNotes, onDeleteNote }) {
   const [source, setSource] = useState('tz');
   const [tradeRows, setTradeRows] = useState(null);
   const [ctRows, setCtRows] = useState(null);
@@ -1847,6 +1852,17 @@ function ImportPanel({ existingTrades, onImport, onDeleteMany, pendingNotes, onD
   const [btFilter, setBtFilter] = useState('');
   const [btManageOpen, setBtManageOpen] = useState(true);
   const [delSel, setDelSel] = useState({});
+  const [recTags, setRecTags] = useState({});
+  // trade che sembrano backtest ma hanno perso il flag: né TradeZero né cTrader, raggruppati per tag
+  const recGroups = useMemo(() => {
+    const g = {};
+    (existingTrades || []).forEach(t => {
+      if (isBT(t)) return; const tg = getTags(t);
+      if (tg.includes(TZ_TAG) || tg.includes(CT_TAG)) return;
+      (tg.length ? tg : ['(senza tag)']).forEach(x => { (g[x] = g[x] || []).push(t); });
+    });
+    return Object.entries(g).map(([tag, list]) => ({ tag, list, withExit: list.filter(t => t.journal?.exitTime).length })).sort((a, b) => b.list.length - a.list.length);
+  }, [existingTrades]);
   const btAll = useMemo(() => (existingTrades || []).filter(isBT), [existingTrades]);
   const btGroups = useMemo(() => groupBtDuplicates(existingTrades, dupMode), [existingTrades, dupMode]);
 
@@ -1971,6 +1987,34 @@ function ImportPanel({ existingTrades, onImport, onDeleteMany, pendingNotes, onD
         {cashRows && Object.keys(locateMap).length === 0 && (<div style={{ color: C.yellow, fontSize: 13, marginTop: 8 }}>⚠ File letto ({cashRows.length} righe) ma nessuna riga "Locate Fees" riconosciuta.</div>)}
         {error && <div style={{ color: C.loss, fontSize: 13, marginTop: 8 }}>{error}</div>}
       </div>
+
+      {source === 'bt' && recGroups.length > 0 && (() => {
+        const chosen = recGroups.filter(g => recTags[g.tag]);
+        const ids = [...new Set(chosen.flatMap(g => g.list.map(t => t.id)))];
+        return (
+        <div style={{ background: C.card, border: `1px solid ${C.accent}55`, borderRadius: 12, overflow: 'hidden' }}>
+          <div style={{ padding: '12px 18px', background: C.card2, fontSize: 12, color: C.accent, textTransform: 'uppercase', letterSpacing: '.07em', fontWeight: 700 }}>🛟 Recupera backtest senza flag</div>
+          <div style={{ padding: 14, display: 'flex', flexDirection: 'column', gap: 10 }}>
+            <div style={{ fontSize: 13, color: C.muted }}>Questi trade non sono marcati come backtest (e per questo finiscono nelle statistiche reali e non vengono visti dai controlli sui duplicati). Spunta i tag che appartengono a strategie di backtest e premi “Marca come backtest”.</div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxHeight: 220, overflowY: 'auto' }}>
+              {recGroups.map(g => (
+                <label key={g.tag} style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 13, color: C.text, cursor: 'pointer' }}>
+                  <input type="checkbox" checked={!!recTags[g.tag]} onChange={() => setRecTags(r => ({ ...r, [g.tag]: !r[g.tag] }))} />
+                  <span style={{ fontWeight: 700 }}>{g.tag}</span>
+                  <span style={{ color: C.muted }}>{g.list.length} trade · {g.withExit} con orario di uscita</span>
+                </label>
+              ))}
+            </div>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+              <button onClick={() => setRecTags(Object.fromEntries(recGroups.filter(g => g.withExit === g.list.length).map(g => [g.tag, true])))} style={{ padding: '6px 12px', borderRadius: 6, border: `1px solid ${C.border}`, background: C.card2, color: C.muted, fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>Seleziona i tag con orario di uscita su tutti i trade</button>
+              <button onClick={() => setRecTags({})} style={{ padding: '6px 12px', borderRadius: 6, border: `1px solid ${C.border}`, background: C.card2, color: C.muted, fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>Deseleziona</button>
+              <button disabled={ids.length === 0} onClick={() => { if (window.confirm('Marcare ' + ids.length + ' trade come BACKTEST?\n\nSaranno tolti dalle statistiche reali e visibili solo selezionando un tag. Puoi ritogliere il flag trade per trade dal pannello “Modifica dati”.')) { onMarkBt(ids); setRecTags({}); } }}
+                style={{ marginLeft: 'auto', padding: '7px 16px', borderRadius: 6, border: 'none', fontWeight: 800, fontSize: 13, background: ids.length ? C.accent : C.border, color: ids.length ? C.onAccent : C.muted, cursor: ids.length ? 'pointer' : 'default' }}>Marca {ids.length} trade come backtest</button>
+            </div>
+          </div>
+        </div>
+        );
+      })()}
 
       {source === 'bt' && btAll.length > 0 && (() => {
         const keepIds = new Set(), dupIds = new Set(), gOf = {};
@@ -2990,6 +3034,7 @@ function TradingJournal() {
   const addTrade = useCallback(async (trade) => { const updated = [...trades, trade]; setTrades(updated); await dataStore.saveTrades(updated); }, [trades]);
   const updateTrade = useCallback(async (trade) => { const updated = trades.map(t => t.id === trade.id ? trade : t); setTrades(updated); await dataStore.saveTrades(updated); }, [trades]);
   const deleteTrade = useCallback(async (id) => { const updated = trades.filter(t => t.id !== id); setTrades(updated); await dataStore.saveTrades(updated); }, [trades]);
+  const markBacktests = useCallback(async (ids) => { const set = new Set(ids); const updated = trades.map(t => set.has(t.id) ? { ...t, backtest: true } : t); setTrades(updated); await dataStore.saveTrades(updated); }, [trades]);
   const deleteTrades = useCallback(async (ids) => { const set = new Set(ids); const updated = trades.filter(t => !set.has(t.id)); setTrades(updated); await dataStore.saveTrades(updated); }, [trades]);
   const duplicateTrade = useCallback(async (trade) => { const copy = { ...trade, id: uuid() }; const updated = [...trades, copy]; setTrades(updated); await dataStore.saveTrades(updated); }, [trades]);
 
@@ -3121,7 +3166,7 @@ function TradingJournal() {
           {tab === 'review' && (<WeeklyReview trades={filteredTrades} reviews={reviews} onSaveReview={saveReview} isDesktop={isDesktop} />)}
           {tab === 'strategy' && (<StrategyView trades={filteredTrades} />)}
           {tab === 'report' && (<ReportPanel trades={filteredTrades} reviews={reviews} />)}
-          {tab === 'import' && (<ImportPanel existingTrades={trades} onImport={importTrades} onDeleteMany={deleteTrades} pendingNotes={pendingNotes} onDeleteNote={deletePendingNote} />)}
+          {tab === 'import' && (<ImportPanel existingTrades={trades} onImport={importTrades} onDeleteMany={deleteTrades} onMarkBt={markBacktests} pendingNotes={pendingNotes} onDeleteNote={deletePendingNote} />)}
 
         </div>
       </div>
