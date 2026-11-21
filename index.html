@@ -564,6 +564,86 @@ function isWin(t) {
   return (t.pnl + getCommission(t)) > 0;
 }
 
+// ── Collegamento trade: più trade della stessa operazione (aumento/riduzione size) ──
+const GROUP_SKIP = ['exitTime', 'durationSec', 'groupId'];
+function getGroupId(t) { return (t && t.journal && t.journal.groupId) || null; }
+function groupMembers(list, gid) { return gid ? list.filter(x => getGroupId(x) === gid) : []; }
+function shareableJournal(j) {
+  const out = {};
+  Object.keys(j || {}).forEach(k => { if (GROUP_SKIP.indexOf(k) === -1) out[k] = j[k]; });
+  return out;
+}
+function isEmptyVal(v) { return v == null || v === '' || (Array.isArray(v) && v.length === 0); }
+function fillJournal(base, extra) {
+  const out = { ...(base || {}) };
+  Object.keys(extra || {}).forEach(k => { if (GROUP_SKIP.indexOf(k) === -1 && isEmptyVal(out[k])) out[k] = extra[k]; });
+  return out;
+}
+function unionTags(a, b) {
+  const out = [];
+  (a || []).concat(b || []).forEach(x => { if (out.indexOf(x) === -1) out.push(x); });
+  return out;
+}
+function timeToSec(s) {
+  if (!s) return null;
+  const p = String(s).split(':');
+  return (Number(p[0]) || 0) * 3600 + (Number(p[1]) || 0) * 60 + (Number(p[2]) || 0);
+}
+// unisce i trade collegati in un'unica operazione (solo per le statistiche, i dati originali non cambiano)
+function mergeLegs(legs) {
+  const L = [...legs].sort((a, b) => (a.date + ' ' + (a.time || '')).localeCompare(b.date + ' ' + (b.time || '')));
+  const first = L[0];
+  const sizes = L.map(getSize);
+  const allSized = sizes.every(x => x != null && x > 0);
+  const totSize = allSized ? sizes.reduce((a, x) => a + x, 0) : null;
+  const wavg = key => {
+    if (!allSized || L.some(x => x[key] == null)) return first[key] != null ? first[key] : null;
+    return L.reduce((a, x, i) => a + x[key] * sizes[i], 0) / totSize;
+  };
+  let dur, exitTime = first.journal ? first.journal.exitTime : null;
+  if (L.every(x => x.time && x.journal && typeof x.journal.durationSec === 'number')) {
+    const ends = L.map(x => timeToSec(x.time) + x.journal.durationSec);
+    const st = Math.min.apply(null, L.map(x => timeToSec(x.time)));
+    const en = Math.max.apply(null, ends);
+    dur = en - st;
+    exitTime = L[ends.indexOf(en)].journal.exitTime || exitTime;
+  }
+  const pipsList = L.map(getPips);
+  let entryTags = [], eventTags = [], tags = [];
+  L.forEach(x => {
+    entryTags = unionTags(entryTags, x.journal && x.journal.entryTags);
+    eventTags = unionTags(eventTags, x.journal && x.journal.eventTags);
+    tags = unionTags(tags, getTags(x));
+  });
+  const journal = { ...(first.journal || {}), entryTags, eventTags };
+  if (dur !== undefined) { journal.durationSec = dur; journal.exitTime = exitTime; }
+  return {
+    ...first,
+    id: 'grp:' + getGroupId(first),
+    pnl: L.reduce((a, x) => a + x.pnl, 0),
+    commission: L.reduce((a, x) => a + getCommission(x), 0),
+    locateCost: L.reduce((a, x) => a + getLocateCost(x), 0),
+    size: totSize != null ? totSize : first.size,
+    pips: pipsList.every(x => x != null) ? pipsList.reduce((a, x) => a + x, 0) : first.pips,
+    entryPrice: wavg('entryPrice'), exitPrice: wavg('exitPrice'),
+    tags, journal, groupCount: L.length,
+  };
+}
+function collapseGroups(trades) {
+  const byGid = {};
+  trades.forEach(t => { const g = getGroupId(t); if (g) (byGid[g] = byGid[g] || []).push(t); });
+  const done = {};
+  const out = [];
+  trades.forEach(t => {
+    const g = getGroupId(t);
+    if (!g || byGid[g].length < 2) { out.push(t); return; }
+    if (done[g]) return;
+    done[g] = true;
+    out.push(mergeLegs(byGid[g]));
+  });
+  return out;
+}
+
 // ─────────────────────────────────────────────────────────────
 // DEFINIZIONE DEL "TRIANGOLO GIALLO ⚠️"
 // Il triangolo appare su un trade quando ha almeno un tag di
@@ -1221,13 +1301,23 @@ function AddTradeForm({ onAddTrade, onAddNote, allTags = [], onClose, isDesktop 
 // ════════════════════════════════════════════════════════════
 // TRADE LOG
 // ════════════════════════════════════════════════════════════
-function TradeLog({ trades, onUpdate, onDelete, onDuplicate, allTags = [], isDesktop }) {
+function TradeLog({ trades, allTrades = [], onUpdate, onUpdateMany, onLinkTrades, onUnlink, onDelete, onDuplicate, allTags = [], isDesktop }) {
   const [expandedId, setExpandedId] = useState(null);
   const [noteDraft, setNoteDraft] = useState('');
   const [tagsDraft, setTagsDraft] = useState([]);
   const [journalDraft, setJournalDraft] = useState({});
   const [chartImageDraft, setChartImageDraft] = useState(null);
   const [dataDraft, setDataDraft] = useState(null);   // modifica dati base (solo backtest)
+  const [linkOpen, setLinkOpen] = useState(false);     // selettore collegamento trade
+  const [linkSel, setLinkSel] = useState([]);
+  const [linkCopy, setLinkCopy] = useState(true);
+  const [syncGroup, setSyncGroup] = useState(false);
+  const linkPool = allTrades.length ? allTrades : trades;
+  const groupCounts = useMemo(() => {
+    const m = {};
+    linkPool.forEach(x => { const g = getGroupId(x); if (g) m[g] = (m[g] || 0) + 1; });
+    return m;
+  }, [linkPool]);
 
   const sorted = useMemo(() => [...trades].sort((a, b) => a.date.localeCompare(b.date)), [trades]);
   const equityCurve = useMemo(() => {
@@ -1258,6 +1348,7 @@ function TradeLog({ trades, onUpdate, onDelete, onDuplicate, allTags = [], isDes
     setJournalDraft(t.journal || {});
     setChartImageDraft(t.chartImage || null);
     setDataDraft(null);
+    setLinkOpen(false); setLinkSel([]); setLinkCopy(true); setSyncGroup(false);
   };
 
   // ── Modifica dati di un trade di backtest ──
@@ -1298,7 +1389,25 @@ function TradeLog({ trades, onUpdate, onDelete, onDuplicate, allTags = [], isDes
     setDataDraft(null);
   };
 
-  const saveNote = t => { onUpdate({ ...t, notes: noteDraft, tags: tagsDraft, journal: journalDraft, chartImage: chartImageDraft }); };
+  const saveNote = t => {
+    const gid = getGroupId(t);
+    const jr = { ...journalDraft };
+    delete jr.groupId;
+    if (gid) jr.groupId = gid;   // il collegamento non si perde mai salvando la nota
+    const saved = { ...t, notes: noteDraft, tags: tagsDraft, journal: jr, chartImage: chartImageDraft };
+    if (syncGroup && gid && onUpdateMany) {
+      const others = groupMembers(linkPool, gid).filter(x => x.id !== t.id).map(x => ({
+        ...x, notes: noteDraft, tags: tagsDraft, chartImage: chartImageDraft,
+        journal: { ...(x.journal || {}), ...shareableJournal(jr) },
+      }));
+      onUpdateMany([saved, ...others]);
+    } else onUpdate(saved);
+  };
+  const doLink = t => {
+    if (!linkSel.length || !onLinkTrades) return;
+    onLinkTrades(t, linkSel, { notes: noteDraft, tags: tagsDraft, chartImage: chartImageDraft, journal: journalDraft }, linkCopy);
+    setLinkOpen(false); setLinkSel([]);
+  };
 
   const renderEquityDot = (props) => {
     const { cx, cy, payload, key } = props;
@@ -1359,6 +1468,7 @@ function TradeLog({ trades, onUpdate, onDelete, onDuplicate, allTags = [], isDes
                 <span style={{ fontSize: isDesktop ? 14 : 12, color: C.muted, width: W_DATE, flexShrink: 0, fontFamily: 'monospace' }}>{t.date}</span>
                 <span style={{ fontSize: isDesktop ? 17 : 13, fontWeight: 800, color: C.text, width: W_TICKER, flexShrink: 0 }}>{t.ticker}</span>
                 <span style={{ fontSize: 11, fontWeight: 800, padding: '3px 8px', borderRadius: 4, flexShrink: 0, width: 58, textAlign: 'center', background: t.side === 'short' ? 'rgba(255,138,128,0.15)' : 'rgba(95,216,143,0.15)', color: t.side === 'short' ? C.loss : C.profit }}>{t.side === 'short' ? 'SHORT' : 'LONG'}</span>
+                {groupCounts[getGroupId(t)] > 1 && (<span title="Trade collegati: stessa operazione" style={{ fontSize: isDesktop ? 11 : 10, fontWeight: 800, padding: isDesktop ? '2px 7px' : '1px 5px', borderRadius: 10, flexShrink: 0, background: `${C.accent}1f`, color: C.accent, border: `1px solid ${C.accent}4d` }}>🔗{groupCounts[getGroupId(t)]}</span>)}
 
                 <div style={{ flex: 1, minWidth: 0 }} />
                 {isDesktop && (<>
@@ -1425,6 +1535,71 @@ function TradeLog({ trades, onUpdate, onDelete, onDuplicate, allTags = [], isDes
                         <button onClick={() => { if (window.confirm('Togliere il flag backtest da questo trade? Tornerà a essere trattato come trade reale.')) { onUpdate({ ...t, backtest: false, tags: getTags(t).filter(x => x !== BT_TAG) }); setDataDraft(null); } }} style={{ marginLeft: 'auto', padding: '8px 16px', borderRadius: 6, border: `1px solid ${C.loss}55`, background: 'transparent', color: C.loss, fontWeight: 700, fontSize: 13, cursor: 'pointer' }}>Togli flag backtest</button>
                       </div>
                     </div>
+                    );
+                  })()}
+                  {(() => {
+                    const gid = getGroupId(t);
+                    const members = groupMembers(linkPool, gid).sort((a, b) => (a.time || '').localeCompare(b.time || ''));
+                    const linked = members.length > 1;
+                    const cands = linkPool.filter(x => x.id !== t.id && x.date === t.date && x.ticker === t.ticker && isBT(x) === isBT(t) && !(gid && getGroupId(x) === gid));
+                    const merged = linked ? mergeLegs(members) : null;
+                    const pbtn = (on) => ({ padding: '7px 14px', borderRadius: 6, border: `1px solid ${on ? C.accent : C.border}`, background: on ? `${C.accent}15` : 'transparent', color: on ? C.accent : C.text, fontWeight: 700, fontSize: 13, cursor: 'pointer' });
+                    const legLine = x => `${x.time ? x.time.slice(0, 5) : '—'} · ${x.entryPrice != null ? '$' + x.entryPrice.toFixed(2) : '—'} → ${x.exitPrice != null ? '$' + x.exitPrice.toFixed(2) : '—'} · ${fmtSize(x)}`;
+                    return (
+                      <div style={{ marginBottom: 16, padding: 14, background: C.card, border: `1px solid ${linked ? C.accent + '55' : C.border}`, borderRadius: 10 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                          <div style={{ fontSize: 13, color: C.accent, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.05em' }}>🔗 {linked ? `Operazione collegata · ${members.length} trade` : 'Operazione'}</div>
+                          <div style={{ marginLeft: 'auto', display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                            <button onClick={() => { setLinkOpen(o => !o); setLinkSel([]); }} style={pbtn(linkOpen)}>{linked ? '＋ Aggiungi trade' : '🔗 Collega a…'}</button>
+                            {linked && <button onClick={() => { if (window.confirm('Scollegare questo trade dall’operazione? Gli altri restano collegati.')) onUnlink && onUnlink(t.id); }} style={{ ...pbtn(false), color: C.muted }}>Scollega</button>}
+                          </div>
+                        </div>
+                        {!linked && !linkOpen && (<div style={{ fontSize: 12, color: C.muted, marginTop: 6 }}>Se più trade fanno parte della stessa operazione (aumento/riduzione size), collegali.</div>)}
+                        {linked && (
+                          <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 6 }}>
+                            {members.map(x => (
+                              <div key={x.id} style={{ display: 'flex', gap: 10, alignItems: 'center', fontSize: 13, fontFamily: 'monospace', color: x.id === t.id ? C.text : C.muted, fontWeight: x.id === t.id ? 800 : 500 }}>
+                                <span style={{ flex: 1, minWidth: 0 }}>{x.id === t.id ? '▸ ' : ''}{legLine(x)}</span>
+                                <span style={{ color: x.pnl >= 0 ? C.profit : C.loss, flexShrink: 0 }}>{fmt$(x.pnl)}</span>
+                              </div>
+                            ))}
+                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 16, fontSize: 13, fontFamily: 'monospace', marginTop: 6, paddingTop: 8, borderTop: `1px solid ${C.border}` }}>
+                              <span style={{ color: C.muted }}>Size totale <b style={{ color: C.text }}>{fmtSize(merged)}</b></span>
+                              <span style={{ color: C.muted }}>Entry medio <b style={{ color: C.text }}>{merged.entryPrice != null ? '$' + merged.entryPrice.toFixed(2) : '—'}</b></span>
+                              <span style={{ color: C.muted }}>Exit medio <b style={{ color: C.text }}>{merged.exitPrice != null ? '$' + merged.exitPrice.toFixed(2) : '—'}</b></span>
+                              <span style={{ color: C.muted }}>PnL operazione <b style={{ color: merged.pnl >= 0 ? C.profit : C.loss }}>{fmt$(merged.pnl)}</b></span>
+                            </div>
+                            <label style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 13, color: C.text, cursor: 'pointer', marginTop: 4 }}>
+                              <input type="checkbox" checked={syncGroup} onChange={e => setSyncGroup(e.target.checked)} />
+                              Quando salvo, applica nota, tag, journaling e screenshot a tutti i trade collegati
+                            </label>
+                          </div>
+                        )}
+                        {linkOpen && (
+                          <div style={{ marginTop: 12, paddingTop: 12, borderTop: `1px solid ${C.border}`, display: 'flex', flexDirection: 'column', gap: 8 }}>
+                            {cands.length === 0 ? (
+                              <div style={{ fontSize: 13, color: C.muted }}>Nessun altro trade di {t.ticker} in data {t.date}.</div>
+                            ) : (<>
+                              <div style={{ fontSize: 12, color: C.muted }}>Seleziona i trade della stessa operazione ({t.ticker}, {t.date}):</div>
+                              {cands.map(x => (
+                                <label key={x.id} style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 13, fontFamily: 'monospace', color: C.text, cursor: 'pointer' }}>
+                                  <input type="checkbox" checked={linkSel.includes(x.id)} onChange={e => setLinkSel(sel => e.target.checked ? [...sel, x.id] : sel.filter(i => i !== x.id))} />
+                                  <span style={{ flex: 1, minWidth: 0 }}>{legLine(x)}{getGroupId(x) ? ' 🔗' : ''}</span>
+                                  <span style={{ color: x.pnl >= 0 ? C.profit : C.loss, flexShrink: 0 }}>{fmt$(x.pnl)}</span>
+                                </label>
+                              ))}
+                              <label style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 13, color: C.text, cursor: 'pointer' }}>
+                                <input type="checkbox" checked={linkCopy} onChange={e => setLinkCopy(e.target.checked)} />
+                                Copia nota, tag, journaling e screenshot di questo trade sugli altri (solo dove sono vuoti)
+                              </label>
+                              <div style={{ display: 'flex', gap: 8 }}>
+                                <button onClick={() => doLink(t)} disabled={!linkSel.length} style={{ padding: '8px 18px', borderRadius: 6, border: 'none', background: linkSel.length ? C.accent : C.border, color: linkSel.length ? C.onAccent : C.muted, fontWeight: 800, fontSize: 13, cursor: linkSel.length ? 'pointer' : 'default' }}>Collega</button>
+                                <button onClick={() => { setLinkOpen(false); setLinkSel([]); }} style={{ ...pbtn(false), color: C.muted }}>Annulla</button>
+                              </div>
+                            </>)}
+                          </div>
+                        )}
+                      </div>
                     );
                   })()}
                   <div style={{ display: 'grid', gridTemplateColumns: isDesktop ? '1fr 1fr' : '1fr', gap: isDesktop ? 20 : 14, alignItems: 'start' }}>
@@ -2203,7 +2378,7 @@ function MultiSelectDropdown({ label, options, selected, onChange, placeholder =
 // ════════════════════════════════════════════════════════════
 // FILTRI
 // ════════════════════════════════════════════════════════════
-function FilterBar({ trades, filters, setFilters }) {
+function FilterBar({ trades, filters, setFilters, hasGroups, perOperation, setPerOperation }) {
   const [expanded, setExpanded] = useState(false);
   const allTags = useMemo(() => {
     const s = new Set();
@@ -2256,6 +2431,8 @@ function FilterBar({ trades, filters, setFilters }) {
         }}>{expanded ? '▲ Meno filtri' : '▼ Altri filtri'}</button>
 
         {active && (<button onClick={reset} style={{ padding: '7px 16px', borderRadius: 6, border: `1px solid ${C.border}`, background: 'transparent', color: C.muted, fontSize: 13, cursor: 'pointer', height: 36 }}>✕ Reset filtri</button>)}
+
+        {hasGroups && (<button onClick={() => setPerOperation(!perOperation)} title="Con ON i trade collegati contano come 1 operazione in KPI, Strategia e Report" style={{ padding: '7px 14px', borderRadius: 6, border: `1px solid ${perOperation ? C.accent : C.border}`, background: perOperation ? `${C.accent}15` : C.card2, color: perOperation ? C.accent : C.muted, fontSize: 13, fontWeight: 700, cursor: 'pointer', height: 36 }}>🔗 Conta per operazione: {perOperation ? 'ON' : 'OFF'}</button>)}
       </div>
 
       {expanded && (
@@ -2962,6 +3139,7 @@ function TradingJournal() {
   const [isWide, setIsWide] = useState(() => typeof window !== 'undefined' ? window.innerWidth >= 1300 : true);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [addFormOpen, setAddFormOpen] = useState(false);
+  const [perOperation, setPerOperation] = useState(false);   // statistiche: trade collegati = 1 operazione
 
   useEffect(() => {
     const onResize = () => {
@@ -3009,6 +3187,9 @@ function TradingJournal() {
     });
   }, [trades, filters]);
 
+  const hasGroups = useMemo(() => trades.some(t => getGroupId(t)), [trades]);
+  const statTrades = useMemo(() => perOperation ? collapseGroups(filteredTrades) : filteredTrades, [perOperation, filteredTrades]);
+
   const ctCount = filteredTrades.filter(t => getTags(t).includes(CT_TAG)).length;
   CUR = (ctCount > 0 && ctCount === filteredTrades.length) ? '€' : '$';
   const mixedCurrency = ctCount > 0 && ctCount < filteredTrades.length;
@@ -3036,7 +3217,45 @@ function TradingJournal() {
   const deleteTrade = useCallback(async (id) => { const updated = trades.filter(t => t.id !== id); setTrades(updated); await dataStore.saveTrades(updated); }, [trades]);
   const markBacktests = useCallback(async (ids) => { const set = new Set(ids); const updated = trades.map(t => set.has(t.id) ? { ...t, backtest: true } : t); setTrades(updated); await dataStore.saveTrades(updated); }, [trades]);
   const deleteTrades = useCallback(async (ids) => { const set = new Set(ids); const updated = trades.filter(t => !set.has(t.id)); setTrades(updated); await dataStore.saveTrades(updated); }, [trades]);
-  const duplicateTrade = useCallback(async (trade) => { const copy = { ...trade, id: uuid() }; const updated = [...trades, copy]; setTrades(updated); await dataStore.saveTrades(updated); }, [trades]);
+  const duplicateTrade = useCallback(async (trade) => { const copy = { ...trade, id: uuid() }; if (copy.journal && copy.journal.groupId) { copy.journal = { ...copy.journal }; delete copy.journal.groupId; } const updated = [...trades, copy]; setTrades(updated); await dataStore.saveTrades(updated); }, [trades]);
+
+  const updateTrades = useCallback(async (list) => {
+    const map = {}; list.forEach(x => { map[x.id] = x; });
+    const updated = trades.map(t => map[t.id] || t);
+    setTrades(updated); await dataStore.saveTrades(updated);
+  }, [trades]);
+  const linkTrades = useCallback(async (source, otherIds, draft, copy) => {
+    const picked = trades.filter(t => otherIds.indexOf(t.id) !== -1);
+    const gids = [getGroupId(source)].concat(picked.map(getGroupId)).filter(Boolean);
+    const gid = gids[0] || uuid();
+    const ids = new Set([source.id].concat(otherIds));
+    trades.forEach(t => { const g = getGroupId(t); if (g && gids.indexOf(g) !== -1) ids.add(t.id); });
+    const updated = trades.map(t => {
+      if (!ids.has(t.id)) return t;
+      if (t.id === source.id) {
+        return { ...t, notes: draft.notes, tags: draft.tags, chartImage: draft.chartImage, journal: { ...(draft.journal || {}), groupId: gid } };
+      }
+      let nt = { ...t, journal: { ...(t.journal || {}), groupId: gid } };
+      if (copy && otherIds.indexOf(t.id) !== -1) {
+        nt = { ...nt,
+          notes: t.notes ? t.notes : draft.notes,
+          tags: unionTags(getTags(t), draft.tags),
+          chartImage: t.chartImage || draft.chartImage || null,
+          journal: { ...fillJournal(nt.journal, shareableJournal(draft.journal)), groupId: gid } };
+      }
+      return nt;
+    });
+    setTrades(updated); await dataStore.saveTrades(updated);
+  }, [trades]);
+  const unlinkTrade = useCallback(async (id) => {
+    const t0 = trades.find(t => t.id === id);
+    const gid = getGroupId(t0);
+    if (!gid) return;
+    const left = trades.filter(t => getGroupId(t) === gid && t.id !== id);
+    const strip = t => { const j = { ...(t.journal || {}) }; delete j.groupId; return { ...t, journal: j }; };
+    const updated = trades.map(t => (t.id === id || (left.length === 1 && t.id === left[0].id)) ? strip(t) : t);
+    setTrades(updated); await dataStore.saveTrades(updated);
+  }, [trades]);
 
   const allTags = useMemo(() => {
     const s = new Set();
@@ -3113,13 +3332,19 @@ function TradingJournal() {
 
           {addFormOpen && (<AddTradeForm onAddTrade={addTrade} onAddNote={addPendingNote} allTags={allTags} onClose={() => setAddFormOpen(false)} isDesktop={isDesktop} />)}
 
-          <KpiStrip trades={filteredTrades} isDesktop={isDesktop} />
+          <KpiStrip trades={statTrades} isDesktop={isDesktop} />
 
-          {tab !== 'import' && (<FilterBar trades={trades} filters={filters} setFilters={setFilters} />)}
+          {tab !== 'import' && (<FilterBar trades={trades} filters={filters} setFilters={setFilters} hasGroups={hasGroups} perOperation={perOperation} setPerOperation={setPerOperation} />)}
 
           {tab !== 'import' && mixedCurrency && (
             <div style={{ background: C.yellow + '14', border: '1px solid ' + C.yellow + '55', borderRadius: 10, padding: '9px 14px', fontSize: 13, color: C.yellow }}>
               ⚠ Stai sommando conti in valute diverse ($ e €). Seleziona un Tag / Conto per statistiche corrette.
+            </div>
+          )}
+
+          {tab !== 'import' && perOperation && hasGroups && (
+            <div style={{ background: C.accent + '14', border: '1px solid ' + C.accent + '55', borderRadius: 10, padding: '9px 14px', fontSize: 13, color: C.accent }}>
+              🔗 Statistiche per operazione: i trade collegati contano come 1 (KPI, Strategia, Report). Calendario e Trade Log restano per singolo trade.
             </div>
           )}
 
@@ -3162,10 +3387,10 @@ function TradingJournal() {
             </>
           )}
 
-          {tab === 'log' && (<TradeLog trades={filteredTrades} onUpdate={updateTrade} onDelete={deleteTrade} onDuplicate={duplicateTrade} allTags={allTags} isDesktop={isDesktop} />)}
+          {tab === 'log' && (<TradeLog trades={filteredTrades} allTrades={trades} onUpdateMany={updateTrades} onLinkTrades={linkTrades} onUnlink={unlinkTrade} onUpdate={updateTrade} onDelete={deleteTrade} onDuplicate={duplicateTrade} allTags={allTags} isDesktop={isDesktop} />)}
           {tab === 'review' && (<WeeklyReview trades={filteredTrades} reviews={reviews} onSaveReview={saveReview} isDesktop={isDesktop} />)}
-          {tab === 'strategy' && (<StrategyView trades={filteredTrades} />)}
-          {tab === 'report' && (<ReportPanel trades={filteredTrades} reviews={reviews} />)}
+          {tab === 'strategy' && (<StrategyView trades={statTrades} />)}
+          {tab === 'report' && (<ReportPanel trades={statTrades} reviews={reviews} />)}
           {tab === 'import' && (<ImportPanel existingTrades={trades} onImport={importTrades} onDeleteMany={deleteTrades} onMarkBt={markBacktests} pendingNotes={pendingNotes} onDeleteNote={deletePendingNote} />)}
 
         </div>
