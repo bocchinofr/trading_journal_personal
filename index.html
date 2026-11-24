@@ -2627,14 +2627,18 @@ function StrategyView({ trades, isDesktop }) {
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: isDesktop ? 'repeat(4, minmax(0, 1fr))' : '1fr', gap: 14, alignItems: 'start' }}>
-        <TagsSection tagRows={tagRows} />
-        <BreakdownSection title="Long vs Short" rows={bySide} note="Nessun side registrato sui trade" />
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 14, minWidth: 0 }}>
+          <TagsSection tagRows={tagRows} />
+          <BreakdownSection title="Long vs Short" rows={bySide} note="Nessun side registrato sui trade" />
+        </div>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14, minWidth: 0 }}>
           <BreakdownSection title="Giorno della settimana" rows={byWeekday} />
           {hasUsStocks && (<BreakdownSection title="Fascia di prezzo entry" rows={byPrice} note="Nessun entry price registrato" />)}
         </div>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 14, minWidth: 0 }}>
+        <div style={{ minWidth: 0 }}>
           {byTime.length > 0 && (<BreakdownSection title="Fascia oraria" rows={byTime} note="Nessun orario registrato — aggiungilo nel form trade o dall'import TradeZero" />)}
+        </div>
+        <div style={{ minWidth: 0 }}>
           {byDur.some(r => r.n > 0) && (<BreakdownSection title="Durata del trade" rows={byDur} />)}
         </div>
       </div>
