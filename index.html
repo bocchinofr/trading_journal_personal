@@ -1247,7 +1247,7 @@ function AddTradeForm({ onAddTrade, onAddNote, allTags = [], onClose, isDesktop 
             <JournalFields journal={journal} onChange={setJournal} />
             <div>
               <div style={labelStyle}>Note libere</div>
-              <textarea value={f.notes} onChange={e => setF({ ...f, notes: e.target.value })} rows={isDesktop ? 10 : 4} placeholder="Scrivi qui le tue sensazioni sul trade…" style={{ ...inputStyle, resize: 'vertical', lineHeight: 1.55, minHeight: isDesktop ? 240 : 100 }} />
+              <textarea value={f.notes} onChange={e => setF({ ...f, notes: e.target.value })} rows={isDesktop ? 10 : 4} placeholder="Scrivi qui le tue sensazioni sul trade…" style={{ ...inputStyle, fontSize: isDesktop ? 17 : 16, resize: 'vertical', lineHeight: 1.6, minHeight: isDesktop ? 240 : 100 }} />
             </div>
           </div>
         </>
@@ -1284,7 +1284,7 @@ function AddTradeForm({ onAddTrade, onAddNote, allTags = [], onClose, isDesktop 
             </div>
             <div>
               <div style={labelStyle}>Note libere</div>
-              <textarea value={f.notes} onChange={e => setF({ ...f, notes: e.target.value })} rows={isDesktop ? 10 : 4} placeholder="Scrivi qui le tue riflessioni…" style={{ ...inputStyle, resize: 'vertical', lineHeight: 1.55, minHeight: isDesktop ? 240 : 100 }} />
+              <textarea value={f.notes} onChange={e => setF({ ...f, notes: e.target.value })} rows={isDesktop ? 10 : 4} placeholder="Scrivi qui le tue riflessioni…" style={{ ...inputStyle, fontSize: isDesktop ? 17 : 16, resize: 'vertical', lineHeight: 1.6, minHeight: isDesktop ? 240 : 100 }} />
             </div>
           </div>
         </>
@@ -2600,10 +2600,15 @@ function durBucket(t) {
   return DUR_ORDER[4];
 }
 
-function StrategyView({ trades }) {
+function StrategyView({ trades, isDesktop }) {
   const tagRows = useMemo(() => groupByTags(trades), [trades]);
   const bySide = useMemo(() => groupStats(trades, t => t.side === 'short' ? 'Short' : t.side === 'long' ? 'Long' : null), [trades]);
-  const byWeekday = useMemo(() => groupStats(trades, t => WEEKDAY_NAMES[(new Date(t.date + 'T00:00:00').getDay() + 6) % 7], WEEKDAY_NAMES), [trades]);
+  // Le statistiche per giorno considerano solo le sessioni lavorative: sabato e domenica sono esclusi.
+  const weekdaysOnly = WEEKDAY_NAMES.slice(0, 5);
+  const byWeekday = useMemo(() => groupStats(trades, t => {
+    const dayIndex = (new Date(t.date + 'T00:00:00').getDay() + 6) % 7;
+    return dayIndex < 5 ? WEEKDAY_NAMES[dayIndex] : null;
+  }, weekdaysOnly), [trades]);
   const isUsStock = t => !isBT(t) && !getTags(t).includes(CT_TAG);
   const hasUsStocks = trades.some(isUsStock);
   const byPrice = useMemo(() => groupStats(trades.filter(t => t.entryPrice != null && isUsStock(t)), t => priceBucket(t.entryPrice), PRICE_ORDER), [trades]);
@@ -2621,16 +2626,17 @@ function StrategyView({ trades }) {
         📊 Analisi su <b style={{ color: C.text }}>{trades.length}</b> trade · {withTime.length} con orario registrato
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(420px, 1fr))', gap: 14, alignItems: 'start' }}>
-        {/* Colonna 1: Tags + Long vs Short uno sotto l'altro */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-          <TagsSection tagRows={tagRows} />
-          <BreakdownSection title="Long vs Short" rows={bySide} note="Nessun side registrato sui trade" />
+      <div style={{ display: 'grid', gridTemplateColumns: isDesktop ? 'repeat(4, minmax(0, 1fr))' : '1fr', gap: 14, alignItems: 'start' }}>
+        <TagsSection tagRows={tagRows} />
+        <BreakdownSection title="Long vs Short" rows={bySide} note="Nessun side registrato sui trade" />
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 14, minWidth: 0 }}>
+          <BreakdownSection title="Giorno della settimana" rows={byWeekday} />
+          {hasUsStocks && (<BreakdownSection title="Fascia di prezzo entry" rows={byPrice} note="Nessun entry price registrato" />)}
         </div>
-        <BreakdownSection title="Giorno della settimana" rows={byWeekday} />
-        {hasUsStocks && (<BreakdownSection title="Fascia di prezzo entry" rows={byPrice} note="Nessun entry price registrato" />)}
-        {byTime.length > 0 && (<BreakdownSection title="Fascia oraria" rows={byTime} note="Nessun orario registrato — aggiungilo nel form trade o dall'import TradeZero" />)}
-        {byDur.some(r => r.n > 0) && (<BreakdownSection title="Durata del trade" rows={byDur} />)}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 14, minWidth: 0 }}>
+          {byTime.length > 0 && (<BreakdownSection title="Fascia oraria" rows={byTime} note="Nessun orario registrato — aggiungilo nel form trade o dall'import TradeZero" />)}
+          {byDur.some(r => r.n > 0) && (<BreakdownSection title="Durata del trade" rows={byDur} />)}
+        </div>
       </div>
     </div>
   );
@@ -3389,7 +3395,7 @@ function TradingJournal() {
 
           {tab === 'log' && (<TradeLog trades={filteredTrades} allTrades={trades} onUpdateMany={updateTrades} onLinkTrades={linkTrades} onUnlink={unlinkTrade} onUpdate={updateTrade} onDelete={deleteTrade} onDuplicate={duplicateTrade} allTags={allTags} isDesktop={isDesktop} />)}
           {tab === 'review' && (<WeeklyReview trades={filteredTrades} reviews={reviews} onSaveReview={saveReview} isDesktop={isDesktop} />)}
-          {tab === 'strategy' && (<StrategyView trades={statTrades} />)}
+          {tab === 'strategy' && (<StrategyView trades={statTrades} isDesktop={isDesktop} />)}
           {tab === 'report' && (<ReportPanel trades={statTrades} reviews={reviews} />)}
           {tab === 'import' && (<ImportPanel existingTrades={trades} onImport={importTrades} onDeleteMany={deleteTrades} onMarkBt={markBacktests} pendingNotes={pendingNotes} onDeleteNote={deletePendingNote} />)}
 
