@@ -196,6 +196,18 @@ const dataStore = {
 };
 
 const fmt$ = v => (v >= 0 ? '+' : '') + v.toFixed(2) + CUR;
+const PIP_DISPLAY_DIVISOR = 10; // cTrader mostra i pips in decimi rispetto alla scala desiderata
+const displayPips = t => {
+  const p = getPips(t);
+  if (p == null) return null;
+  // cTrader: 174 -> 17.4; FX Replay backtest: price delta 1.74 -> 17.4.
+  if (getTags(t).includes(CT_TAG)) return p / PIP_DISPLAY_DIVISOR;
+  if (isBT(t)) return p * PIP_DISPLAY_DIVISOR;
+  return p;
+};
+const fmtMetric = (v, pipsMode) => pipsMode
+  ? (v >= 0 ? '+' : '') + v.toFixed(1) + ' pip'
+  : fmt$(v);
 const monthNames = ['Gen','Feb','Mar','Apr','Mag','Giu','Lug','Ago','Set','Ott','Nov','Dic'];
 const dayLabels = ['L','M','M','G','V','S','D'];
 
@@ -665,19 +677,23 @@ function isGoodTrade(t) {
 // ════════════════════════════════════════════════════════════
 // KPI STRIP
 // ════════════════════════════════════════════════════════════
-function KpiStrip({ trades, isDesktop }) {
+function KpiStrip({ trades, isDesktop, pipsMode }) {
   const stats = useMemo(() => {
     const n = trades.length;
     const wins = trades.filter(isWin);
     const losses = trades.filter(t => !isWin(t));
-    const totalPnl = trades.reduce((s, t) => s + t.pnl, 0);
+    const metricTrades = pipsMode ? trades.filter(t => displayPips(t) != null) : trades;
+    const metricValue = t => pipsMode ? (displayPips(t) ?? 0) : t.pnl;
+    const metricWins = pipsMode ? metricTrades.filter(t => metricValue(t) > 0) : wins;
+    const metricLosses = pipsMode ? metricTrades.filter(t => metricValue(t) <= 0) : losses;
+    const totalPnl = metricTrades.reduce((s, t) => s + metricValue(t), 0);
     const winrate = n ? wins.length / n : 0;
-    const avgWin = wins.length ? wins.reduce((s, t) => s + t.pnl, 0) / wins.length : 0;
-    const avgLoss = losses.length ? Math.abs(losses.reduce((s, t) => s + t.pnl, 0) / losses.length) : 0;
-    const expectancy = n ? totalPnl / n : 0;
-    const pf = avgLoss > 0 && losses.length ? (avgWin * wins.length) / (avgLoss * losses.length) : 0;
+    const avgWin = metricWins.length ? metricWins.reduce((s, t) => s + metricValue(t), 0) / metricWins.length : 0;
+    const avgLoss = metricLosses.length ? Math.abs(metricLosses.reduce((s, t) => s + metricValue(t), 0) / metricLosses.length) : 0;
+    const expectancy = metricTrades.length ? totalPnl / metricTrades.length : 0;
+    const pf = avgLoss > 0 && metricLosses.length ? (avgWin * metricWins.length) / (avgLoss * metricLosses.length) : 0;
 
-    const sorted = [...trades].sort((a, b) => a.pnl - b.pnl);
+    const sorted = [...metricTrades].sort((a, b) => metricValue(a) - metricValue(b));
     const worst = sorted[0];
     const best = sorted[sorted.length - 1];
 
@@ -701,11 +717,11 @@ function KpiStrip({ trades, isDesktop }) {
     }
 
     return {
-      n, totalPnl, winrate, expectancy, pf, avgWin, avgLoss, best, worst,
+      n, totalPnl, winrate, expectancy, pf, avgWin, avgLoss, best, worst, metricValue, metricTrades,
       maxWinStreak, maxLossStreak, winsCount: wins.length, lossesCount: losses.length,
       isNewHigh, currentStreak, currentStreakType,
     };
-  }, [trades]);
+  }, [trades, pipsMode]);
 
   const lowData = stats.n < 20;
   const badgeStyle = color => ({
@@ -723,7 +739,7 @@ function KpiStrip({ trades, isDesktop }) {
       label: 'Winrate', val: `${(stats.winrate * 100).toFixed(0)}%`, color: stats.winrate >= 0.5 ? C.profit : C.loss,
       badge: lowData ? { text: `◐ Pochi dati (${stats.n})`, color: C.yellow } : null,
     },
-    { label: 'Expectancy', val: fmt$(stats.expectancy), color: C.text, badge: null },
+    { label: 'Expectancy', val: fmtMetric(stats.expectancy, pipsMode), color: C.text, badge: null },
     {
       label: 'Profit factor', val: stats.pf.toFixed(2), color: stats.pf >= 1.5 ? C.profit : C.loss,
       badge: stats.pf < 1.2 ? { text: '▼ Sotto soglia', color: C.loss }
@@ -735,12 +751,12 @@ function KpiStrip({ trades, isDesktop }) {
     ? `${stats.currentStreak} ${stats.currentStreakType ? 'win' : 'loss'} di fila`
     : '—';
 
-  const secKpis = stats.n ? [
-    { label: 'Miglior trade', val: fmt$(stats.best.pnl), sub: stats.best.ticker, color: C.profit },
-    { label: 'Peggior trade', val: fmt$(stats.worst.pnl), sub: stats.worst.ticker, color: C.loss },
+  const secKpis = stats.metricTrades.length ? [
+    { label: 'Miglior trade', val: fmtMetric(stats.metricValue(stats.best), pipsMode), sub: stats.best.ticker, color: C.profit },
+    { label: 'Peggior trade', val: fmtMetric(stats.metricValue(stats.worst), pipsMode), sub: stats.worst.ticker, color: C.loss },
     { label: 'Trade totali', val: String(stats.n), sub: `${stats.winsCount} win / ${stats.lossesCount} loss`, color: C.accent },
-    { label: 'Profit medio', val: fmt$(stats.avgWin), sub: 'sui vinti', color: C.profit },
-    { label: 'Loss medio', val: '-' + stats.avgLoss.toFixed(0) + CUR, sub: 'sui persi', color: C.loss },
+    { label: 'Profit medio', val: fmtMetric(stats.avgWin, pipsMode), sub: 'sui vinti', color: C.profit },
+    { label: 'Loss medio', val: '-' + (pipsMode ? stats.avgLoss.toFixed(1) + ' pip' : stats.avgLoss.toFixed(0) + CUR), sub: 'sui persi', color: C.loss },
     {
       label: 'Streak', val: `${stats.maxWinStreak} / ${stats.maxLossStreak}`,
       sub: `ora: ${streakLabel}`, color: stats.currentStreakType ? C.profit : C.loss,
@@ -787,13 +803,14 @@ function KpiStrip({ trades, isDesktop }) {
 // ════════════════════════════════════════════════════════════
 // CALENDARIO
 // ════════════════════════════════════════════════════════════
-function MonthCalendar({ trades, onDayClick, isDesktop, cursor, setCursor }) {
+function MonthCalendar({ trades, onDayClick, isDesktop, cursor, setCursor, pipsMode }) {
   const dayData = useMemo(() => {
     const map = {};
     trades.forEach(t => {
       const key = t.date;
-      if (!map[key]) map[key] = { pnl: 0, count: 0, hasWarning: false };
+      if (!map[key]) map[key] = { pnl: 0, pips: 0, pipsCount: 0, count: 0, hasWarning: false };
       map[key].pnl += t.pnl;
+      const pip = displayPips(t); if (pip != null) { map[key].pips += pip; map[key].pipsCount += 1; }
       map[key].count += 1;
       if (getWarningTags(t).length > 0) map[key].hasWarning = true;
     });
@@ -810,7 +827,7 @@ function MonthCalendar({ trades, onDayClick, isDesktop, cursor, setCursor }) {
 
   const monthTotal = Object.entries(dayData)
     .filter(([k]) => k.startsWith(`${cursor.y}-${String(cursor.m + 1).padStart(2, '0')}`))
-    .reduce((s, [, v]) => s + v.pnl, 0);
+    .reduce((s, [, v]) => s + (pipsMode ? v.pips : v.pnl), 0);
 
   const intensity = pnl => C.calMin + Math.min(Math.abs(pnl) / 300, 1) * C.calRange;
 
@@ -820,7 +837,7 @@ function MonthCalendar({ trades, onDayClick, isDesktop, cursor, setCursor }) {
         <button onClick={() => setCursor(c => c.m === 0 ? { y: c.y - 1, m: 11 } : { y: c.y, m: c.m - 1 })} style={navBtnStyle}>‹</button>
         <div style={{ textAlign: 'center' }}>
           <div style={{ fontWeight: 800, fontSize: isDesktop ? 22 : 17, color: C.text }}>{monthNames[cursor.m]} {cursor.y}</div>
-          <div style={{ fontSize: isDesktop ? 17 : 14, fontFamily: 'monospace', color: monthTotal >= 0 ? C.profit : C.loss, marginTop: 3, fontWeight: 700 }}>{fmt$(monthTotal)}</div>
+          <div style={{ fontSize: isDesktop ? 17 : 14, fontFamily: 'monospace', color: monthTotal >= 0 ? C.profit : C.loss, marginTop: 3, fontWeight: 700 }}>{fmtMetric(monthTotal, pipsMode)}</div>
         </div>
         <button onClick={() => setCursor(c => c.m === 11 ? { y: c.y + 1, m: 0 } : { y: c.y, m: c.m + 1 })} style={navBtnStyle}>›</button>
       </div>
@@ -835,7 +852,8 @@ function MonthCalendar({ trades, onDayClick, isDesktop, cursor, setCursor }) {
           const key = `${cursor.y}-${String(cursor.m + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
           const info = dayData[key];
           const has = info !== undefined;
-          const bg = !has ? C.card2 : info.pnl >= 0 ? `rgba(${C.calPos},${intensity(info.pnl)})` : `rgba(${C.calNeg},${intensity(info.pnl)})`;
+          const cellValue = pipsMode ? info?.pips : info?.pnl;
+          const bg = !has ? C.card2 : cellValue >= 0 ? `rgba(${C.calPos},${intensity(cellValue)})` : `rgba(${C.calNeg},${intensity(cellValue)})`;
           return (
             <div key={i} onClick={() => has && onDayClick(key)} style={{
               minHeight: 0, borderRadius: 8, background: bg, position: 'relative',
@@ -848,8 +866,8 @@ function MonthCalendar({ trades, onDayClick, isDesktop, cursor, setCursor }) {
               )}
               <span style={{ fontSize: isDesktop ? 22 : 16, color: has ? C.text : C.muted, fontWeight: 800, lineHeight: 1 }}>{d}</span>
               {has && (<>
-                <span style={{ fontSize: isDesktop ? 17 : 13, fontFamily: 'monospace', fontWeight: 800, color: info.pnl >= 0 ? C.profit : C.loss, marginTop: 4, lineHeight: 1 }}>
-                  {info.pnl >= 0 ? '+' : ''}{Math.round(info.pnl)}
+                <span style={{ fontSize: isDesktop ? 17 : 13, fontFamily: 'monospace', fontWeight: 800, color: (pipsMode ? info.pips : info.pnl) >= 0 ? C.profit : C.loss, marginTop: 4, lineHeight: 1 }}>
+                  {(pipsMode ? info.pips : info.pnl) >= 0 ? '+' : ''}{pipsMode ? (info.pipsCount ? info.pips.toFixed(1) : '—') : Math.round(info.pnl)}
                 </span>
                 <span style={{ fontSize: isDesktop ? 13 : 10, color: C.muted, marginTop: 3, lineHeight: 1 }}>{info.count} tr.</span>
               </>)}
@@ -863,7 +881,7 @@ function MonthCalendar({ trades, onDayClick, isDesktop, cursor, setCursor }) {
 
 const navBtnStyle = { width: 34, height: 34, borderRadius: 6, border: `1px solid ${C.border}`, background: C.card2, color: C.text, cursor: 'pointer', fontSize: 20 };
 
-function MonthMini({ year, month, dayPnl, onDayClick }) {
+function MonthMini({ year, month, dayPnl, onDayClick, pipsMode }) {
   const first = new Date(year, month, 1);
   const startOffset = (first.getDay() + 6) % 7;
   const daysInMonth = new Date(year, month + 1, 0).getDate();
@@ -871,7 +889,7 @@ function MonthMini({ year, month, dayPnl, onDayClick }) {
   for (let i = 0; i < startOffset; i++) cells.push(null);
   for (let d = 1; d <= daysInMonth; d++) cells.push(d);
 
-  const monthTotal = Object.entries(dayPnl).filter(([k]) => k.startsWith(`${year}-${String(month + 1).padStart(2, '0')}`)).reduce((s, [, v]) => s + v.pnl, 0);
+  const monthTotal = Object.entries(dayPnl).filter(([k]) => k.startsWith(`${year}-${String(month + 1).padStart(2, '0')}`)).reduce((s, [, v]) => s + (pipsMode ? v.pips : v.pnl), 0);
   const hasTrades = Object.keys(dayPnl).some(k => k.startsWith(`${year}-${String(month + 1).padStart(2, '0')}`));
   const intensity = pnl => C.calMin + Math.min(Math.abs(pnl) / 300, 1) * C.calRange;
 
@@ -880,7 +898,7 @@ function MonthMini({ year, month, dayPnl, onDayClick }) {
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 8 }}>
         <span style={{ fontSize: 14, fontWeight: 800, color: C.text }}>{monthNames[month]} {year}</span>
         <span style={{ fontSize: 13, fontFamily: 'monospace', fontWeight: 700, color: hasTrades ? (monthTotal >= 0 ? C.profit : C.loss) : C.muted }}>
-          {hasTrades ? fmt$(monthTotal) : '—'}
+          {hasTrades ? fmtMetric(monthTotal, pipsMode) : '—'}
         </span>
       </div>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 3, marginBottom: 3 }}>
@@ -892,7 +910,8 @@ function MonthMini({ year, month, dayPnl, onDayClick }) {
           const key = `${year}-${String(month + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
           const info = dayPnl[key];
           const has = info !== undefined;
-          const bg = !has ? C.card2 : info.pnl >= 0 ? `rgba(${C.calPos},${intensity(info.pnl)})` : `rgba(${C.calNeg},${intensity(info.pnl)})`;
+          const cellValue = pipsMode ? info?.pips : info?.pnl;
+          const bg = !has ? C.card2 : cellValue >= 0 ? `rgba(${C.calPos},${intensity(cellValue)})` : `rgba(${C.calNeg},${intensity(cellValue)})`;
           return (
             <div key={i} onClick={() => has && onDayClick && onDayClick(key)}
               title={has ? `${key}: ${fmt$(info.pnl)} (${info.count} tr.)` : key}
@@ -911,12 +930,13 @@ function MonthMini({ year, month, dayPnl, onDayClick }) {
   );
 }
 
-function LastMonthsSidebar({ trades, onDayClick }) {
+function LastMonthsSidebar({ trades, onDayClick, pipsMode }) {
   const dayPnl = useMemo(() => {
     const map = {};
     trades.forEach(t => {
-      if (!map[t.date]) map[t.date] = { pnl: 0, count: 0 };
+      if (!map[t.date]) map[t.date] = { pnl: 0, pips: 0, count: 0 };
       map[t.date].pnl += t.pnl;
+      const pip = displayPips(t); if (pip != null) map[t.date].pips += pip;
       map[t.date].count += 1;
     });
     return map;
@@ -935,24 +955,25 @@ function LastMonthsSidebar({ trades, onDayClick }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
       <div style={{ fontSize: 12, color: C.muted, textTransform: 'uppercase', letterSpacing: '.07em', fontWeight: 700 }}>Ultimi 2 mesi</div>
-      {months.map(({ y, m }) => (<MonthMini key={`${y}-${m}`} year={y} month={m} dayPnl={dayPnl} onDayClick={onDayClick} />))}
+      {months.map(({ y, m }) => (<MonthMini key={`${y}-${m}`} year={y} month={m} dayPnl={dayPnl} onDayClick={onDayClick} pipsMode={pipsMode} />))}
     </div>
   );
 }
 
-function YearView({ trades, onDayClick }) {
+function YearView({ trades, onDayClick, pipsMode }) {
   const [year, setYear] = useState(() => new Date().getFullYear());
   const dayData = useMemo(() => {
     const map = {};
     trades.forEach(t => {
-      if (!map[t.date]) map[t.date] = { pnl: 0, count: 0 };
+      if (!map[t.date]) map[t.date] = { pnl: 0, pips: 0, count: 0 };
       map[t.date].pnl += t.pnl;
+      const pip = displayPips(t); if (pip != null) map[t.date].pips += pip;
       map[t.date].count += 1;
     });
     return map;
   }, [trades]);
 
-  const yearTotal = Object.entries(dayData).filter(([k]) => k.startsWith(String(year))).reduce((s, [, v]) => s + v.pnl, 0);
+  const yearTotal = Object.entries(dayData).filter(([k]) => k.startsWith(String(year))).reduce((s, [, v]) => s + (pipsMode ? v.pips : v.pnl), 0);
   const yearTrades = Object.entries(dayData).filter(([k]) => k.startsWith(String(year))).reduce((s, [, v]) => s + v.count, 0);
 
   return (
@@ -961,12 +982,12 @@ function YearView({ trades, onDayClick }) {
         <button onClick={() => setYear(y => y - 1)} style={navBtnStyle}>‹</button>
         <div style={{ textAlign: 'center' }}>
           <div style={{ fontWeight: 800, fontSize: 22, color: C.text }}>{year}</div>
-          <div style={{ fontSize: 17, fontFamily: 'monospace', fontWeight: 700, color: yearTotal >= 0 ? C.profit : C.loss, marginTop: 3 }}>{fmt$(yearTotal)} · {yearTrades} trade</div>
+          <div style={{ fontSize: 17, fontFamily: 'monospace', fontWeight: 700, color: yearTotal >= 0 ? C.profit : C.loss, marginTop: 3 }}>{fmtMetric(yearTotal, pipsMode)} · {yearTrades} trade</div>
         </div>
         <button onClick={() => setYear(y => y + 1)} style={navBtnStyle}>›</button>
       </div>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(340px, 1fr))', gap: 14 }}>
-        {Array.from({ length: 12 }, (_, m) => (<MonthMini key={m} year={year} month={m} dayPnl={dayData} onDayClick={onDayClick} />))}
+        {Array.from({ length: 12 }, (_, m) => (<MonthMini key={m} year={year} month={m} dayPnl={dayData} onDayClick={onDayClick} pipsMode={pipsMode} />))}
       </div>
     </div>
   );
@@ -3137,6 +3158,7 @@ function TradingJournal() {
   const [loading, setLoading] = useState(true);
   const [selectedDay, setSelectedDay] = useState(null);
   const [calendarView, setCalendarView] = useState('month');
+  const [pipsMode, setPipsMode] = useState(() => { try { return localStorage.getItem('trading-journal:pips-mode') === '1'; } catch { return false; } });
   const [calendarCursor, setCalendarCursor] = useState(() => { const d = new Date(); return { y: d.getFullYear(), m: d.getMonth() }; });
   const [tab, setTab] = useState('calendar');
   const [filters, setFilters] = useState({
@@ -3161,6 +3183,8 @@ function TradingJournal() {
   }, []);
 
   applyTheme(theme);
+
+  const togglePipsMode = value => { setPipsMode(value); try { localStorage.setItem('trading-journal:pips-mode', value ? '1' : '0'); } catch {} };
 
   const toggleTheme = async () => { const next = theme === 'dark' ? 'light' : 'dark'; setTheme(next); await dataStore.saveTheme(next); };
 
@@ -3342,7 +3366,7 @@ function TradingJournal() {
 
           {addFormOpen && (<AddTradeForm onAddTrade={addTrade} onAddNote={addPendingNote} allTags={allTags} onClose={() => setAddFormOpen(false)} isDesktop={isDesktop} />)}
 
-          <KpiStrip trades={statTrades} isDesktop={isDesktop} />
+          <KpiStrip trades={statTrades} isDesktop={isDesktop} pipsMode={pipsMode} />
 
           {tab !== 'import' && (<FilterBar trades={trades} filters={filters} setFilters={setFilters} hasGroups={hasGroups} perOperation={perOperation} setPerOperation={setPerOperation} />)}
 
@@ -3366,16 +3390,22 @@ function TradingJournal() {
 
           {tab === 'calendar' && (
             <>
-              <div style={{ display: 'flex', gap: 6 }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+                <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8, color: C.muted, fontSize: 13, cursor: 'pointer' }}>
+                  <input type="checkbox" checked={pipsMode} onChange={e => togglePipsMode(e.target.checked)} />
+                  Mostra pips invece di €
+                </label>
+                <div style={{ display: 'flex', gap: 6 }}>
                 {[['month', '📅 Mese'], ['year', '🗓 Anno']].map(([v, l]) => (
                   <button key={v} onClick={() => setCalendarView(v)} style={{ padding: '7px 16px', borderRadius: 6, cursor: 'pointer', fontSize: 13, fontWeight: 700, border: `1px solid ${calendarView === v ? C.accent : C.border}`, background: calendarView === v ? `${C.accent}15` : C.card2, color: calendarView === v ? C.accent : C.muted }}>{l}</button>
                 ))}
+                </div>
               </div>
               {calendarView === 'month' ? (
                 <>
                   <div style={{ display: 'grid', gridTemplateColumns: isWide ? 'minmax(0, 1fr) 360px' : '1fr', gap: 20, alignItems: 'stretch' }}>
-                    <MonthCalendar trades={filteredTrades} onDayClick={setSelectedDay} isDesktop={isDesktop} cursor={calendarCursor} setCursor={setCalendarCursor} />
-                    {isDesktop && (<LastMonthsSidebar trades={filteredTrades} onDayClick={setSelectedDay} />)}
+                    <MonthCalendar trades={filteredTrades} onDayClick={setSelectedDay} isDesktop={isDesktop} cursor={calendarCursor} setCursor={setCalendarCursor} pipsMode={pipsMode} />
+                    {isDesktop && (<LastMonthsSidebar trades={filteredTrades} onDayClick={setSelectedDay} pipsMode={pipsMode} />)}
                   </div>
                   {selectedDay && (
                     <div
@@ -3393,7 +3423,7 @@ function TradingJournal() {
                     </div>
                   )}
                 </>
-              ) : (<YearView trades={filteredTrades} onDayClick={setSelectedDay} />)}
+              ) : (<YearView trades={filteredTrades} onDayClick={setSelectedDay} pipsMode={pipsMode} />)}
             </>
           )}
 
