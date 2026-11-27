@@ -339,7 +339,8 @@ function buildRoundTripsFromTradeHistory(rows) {
 // ─────────────────────────────────────────────────────────────
 // cTRADER: ogni riga del CSV = una posizione chiusa
 // ─────────────────────────────────────────────────────────────
-const NULL_ENTRY_TAG = '__ENTRY_TAG_NULL__';\nconst CT_TAG = 'Import cTrader';
+const NULL_ENTRY_TAG = '__ENTRY_TAG_NULL__';
+const CT_TAG = 'Import cTrader';
 const TZ_TAG = 'Import TradeZero';
 const BT_TAG = 'Backtest';
 const TICKER_ALIAS = { DE30EUR: 'GER40' };   // nomi FX Replay/OANDA -> nome usato nel journal
